@@ -148,12 +148,6 @@ export default function App() {
   const fromPosition = fromVault ? positions[fromVault.id] : undefined;
   const availableAmount = fromPosition?.availableAmount ?? 0;
   const depositedAmount = fromPosition?.depositedAmount ?? 0;
-  const positionStatus = wallet
-    ? positionsLoading
-      ? "Loading..."
-      : "Ready"
-    : "Connect wallet";
-
   useEffect(() => {
     if (!fromVault) {
       setMoveAmount("");
@@ -183,14 +177,6 @@ export default function App() {
     () => kaminoPositionRows.filter((row) => row.hasBalance),
     [kaminoPositionRows]
   );
-
-  const kaminoPositionStatus = wallet
-    ? positionsLoading
-      ? "Loading..."
-      : kaminoPositionsWithBalance.length > 0
-        ? "Positions detected"
-        : "No balances detected"
-    : "Connect wallet";
 
   const sortedVaults = useMemo(() => {
     const sorted = vaults.slice().sort((a, b) => {
@@ -354,12 +340,27 @@ export default function App() {
     }
   };
 
+  const truncateAddress = (addr: string) =>
+    addr.length > 12 ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : addr;
+
   if (loading) {
-    return <div className="page">Loading vaults...</div>;
+    return (
+      <div className="page">
+        <div className="card" style={{ textAlign: "center", padding: "48px 24px" }}>
+          <p className="muted">Loading vaults...</p>
+        </div>
+      </div>
+    );
   }
 
   if (error) {
-    return <div className="page error">Error: {error}</div>;
+    return (
+      <div className="page">
+        <div className="card" style={{ textAlign: "center", padding: "48px 24px" }}>
+          <p className="error">{error}</p>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -367,105 +368,72 @@ export default function App() {
       <header className="header">
         <div>
           <p className="eyebrow">EasyHop Solana</p>
-          <h1>All lending vaults in one view</h1>
+          <h1>Lending vault aggregator</h1>
           <p className="subhead">
-            Compare APY, TVL, and liquidity across Solend and Kamino Lend.
+            Compare yields and move funds across Solend and Kamino Lend in one place.
           </p>
         </div>
-        <div className="pill">Lending</div>
-      </header>
-
-      <section className="card">
-        <h2>Your Kamino positions</h2>
-        <p className="muted">
-          Shows balances detected for Kamino Lend vaults from your wallet.
-        </p>
-        <div className="position-summary">
-          <div>
-            <span className="muted">Wallet</span>
-            <span className="position-value">
-              {wallet?.publicKey?.toBase58() ?? "Not connected"}
-            </span>
-          </div>
-          <div>
-            <span className="muted">Status</span>
-            <span className="position-value">{kaminoPositionStatus}</span>
-          </div>
-          <div>
-            <span className="muted">Vaults with balances</span>
-            <span className="position-value">
-              {wallet
-                ? kaminoPositionsWithBalance.length
-                : "—"}
-            </span>
-          </div>
-        </div>
-        {wallet && kaminoPositionsWithBalance.length > 0 ? (
-          <div className="table">
-            <div className="row header-row positions-row">
-              <span>Vault</span>
-              <span>Asset</span>
-              <span>Lent</span>
-              <span>Available</span>
-              <span>Status</span>
-            </div>
-            {kaminoPositionsWithBalance.map((row) => (
-              <div key={row.vault.id} className="row positions-row">
-                <div>
-                  <strong>{row.vault.poolName}</strong>
-                  <div className="muted">{row.vault.vaultName}</div>
-                </div>
-                <span>{row.vault.assetSymbol}</span>
-                <span>{formatTokenAmount(row.deposited, row.vault.assetSymbol)}</span>
-                <span>{formatTokenAmount(row.available, row.vault.assetSymbol)}</span>
-                <span className={`tag ${row.hasBalance ? "strong" : ""}`}>
-                  {row.hasBalance ? "Detected" : "Not detected"}
-                </span>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="muted">
-            {wallet
-              ? "No Kamino positions detected yet."
-              : "Connect your wallet to load Kamino positions."}
-          </p>
-        )}
-      </section>
-
-      <section className="card">
-        <h2>Move funds in one click</h2>
-        <p className="muted">
-          Withdraw from one vault and deposit into another in a single flow.
-        </p>
-        <p className="steps">
-          Steps: Withdraw → Swap (if needed) → Deposit
-        </p>
-        <div className="wallet-row">
-          <div className="wallet-info">
-            <span className="muted">Wallet</span>
-            <span className="wallet-address">
-              {wallet?.publicKey?.toBase58() ?? "Not connected"}
-            </span>
-          </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <div className="pill">Lending</div>
           {wallet ? (
             <button className="ghost" onClick={handleDisconnect}>
-              Disconnect
+              {truncateAddress(wallet.publicKey?.toBase58() ?? "")}
             </button>
           ) : (
-            <button className="ghost" onClick={handleConnect}>
-              Connect wallet
+            <button className="primary" onClick={handleConnect}>
+              Connect
             </button>
           )}
         </div>
+      </header>
+
+      {wallet && (
+        <section className="card">
+          <h2>Your positions</h2>
+          <p className="muted">Active Kamino Lend deposits detected from your wallet.</p>
+          {kaminoPositionsWithBalance.length > 0 ? (
+            <div className="table" style={{ marginTop: "14px" }}>
+              <div className="row header-row positions-row">
+                <span>Vault</span>
+                <span>Asset</span>
+                <span>Deposited</span>
+                <span>Available</span>
+                <span></span>
+              </div>
+              {kaminoPositionsWithBalance.map((row) => (
+                <div key={row.vault.id} className="row positions-row">
+                  <div>
+                    <strong style={{ fontSize: "13px" }}>{row.vault.vaultName}</strong>
+                    <div className="muted" style={{ fontSize: "11px" }}>{row.vault.poolName}</div>
+                  </div>
+                  <span>{row.vault.assetSymbol}</span>
+                  <span style={{ fontWeight: 600 }}>
+                    {formatTokenAmount(row.deposited, row.vault.assetSymbol)}
+                  </span>
+                  <span>{formatTokenAmount(row.available, row.vault.assetSymbol)}</span>
+                  <span className="tag strong">Active</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="muted" style={{ marginTop: "12px" }}>
+              {positionsLoading ? "Scanning..." : "No active Kamino positions found."}
+            </p>
+          )}
+        </section>
+      )}
+
+      <section className="card">
+        <h2>Move funds</h2>
+        <p className="muted">Withdraw from one vault and deposit into another. Swap included if assets differ.</p>
         <div className="move-grid">
           <label>
-            From vault
+            Source vault
             <select
               value={fromVaultId}
               onChange={(event) => setFromVaultId(event.target.value)}
             >
-              <option value="">Select vault</option>
+              <option value="">Select source</option>
               {fromVaultOptions.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
@@ -474,12 +442,12 @@ export default function App() {
             </select>
           </label>
           <label>
-            To vault
+            Destination vault
             <select
               value={toVaultId}
               onChange={(event) => setToVaultId(event.target.value)}
             >
-              <option value="">Select vault</option>
+              <option value="">Select destination</option>
               {vaultOptions.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
@@ -499,58 +467,49 @@ export default function App() {
             />
           </label>
         </div>
-        <div className="position-summary">
-          <div>
-            <span className="muted">Lent in selected vault</span>
-            <span className="position-value">
-              {fromVault
-                ? formatTokenAmount(depositedAmount, fromVault.assetSymbol)
-                : "—"}
-            </span>
+        {fromVault && (
+          <div className="position-summary">
+            <div>
+              <span className="muted">Deposited</span>
+              <span className="position-value">
+                {formatTokenAmount(depositedAmount, fromVault.assetSymbol)}
+              </span>
+            </div>
+            <div>
+              <span className="muted">Available</span>
+              <span className="position-value">
+                {formatTokenAmount(availableAmount, fromVault.assetSymbol)}
+              </span>
+            </div>
           </div>
-          <div>
-            <span className="muted">Available to move</span>
-            <span className="position-value">
-              {fromVault
-                ? formatTokenAmount(availableAmount, fromVault.assetSymbol)
-                : "—"}
-            </span>
-          </div>
-          <div>
-            <span className="muted">Position status</span>
-            <span className="position-value">
-              {positionStatus}
-            </span>
-          </div>
+        )}
+        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          <button
+            className="primary"
+            onClick={handleMove}
+            disabled={
+              moving ||
+              positionsLoading ||
+              availableAmount <= 0 ||
+              !canMove(fromVault, toVault)
+            }
+          >
+            {moving ? "Processing..." : "Move funds"}
+          </button>
+          {fromVault &&
+            toVault &&
+            fromVault.assetMint !== toVault.assetMint && (
+              <span className="muted" style={{ fontSize: "12px" }}>
+                Includes Jupiter swap
+              </span>
+            )}
         </div>
-        <button
-          className="primary"
-          onClick={handleMove}
-          disabled={
-            moving ||
-            positionsLoading ||
-            availableAmount <= 0 ||
-            !canMove(fromVault, toVault)
-          }
-        >
-          {moving ? "Submitting..." : "Move funds"}
-        </button>
-        {fromVault &&
-          toVault &&
-          fromVault.assetMint !== toVault.assetMint && (
-            <p className="warning">
-              This move will swap assets via Jupiter between withdraw and
-              deposit.
-            </p>
-          )}
         {moveResult && <p className="result">{moveResult}</p>}
       </section>
 
       <section className="card">
-        <h2>Deposit into any vault</h2>
-        <p className="muted">
-          Choose a vault and deposit directly from your wallet.
-        </p>
+        <h2>Deposit</h2>
+        <p className="muted">Deposit directly into any vault from your wallet or SOL balance.</p>
         <div className="move-grid">
           <label>
             Vault
@@ -567,15 +526,15 @@ export default function App() {
             </select>
           </label>
           <label>
-            Funding source
+            Pay with
             <select
               value={depositSource}
               onChange={(event) =>
                 setDepositSource(event.target.value === "sol" ? "sol" : "asset")
               }
             >
-              <option value="asset">From wallet asset</option>
-              <option value="sol">From SOL (swap via Jupiter)</option>
+              <option value="asset">Vault asset from wallet</option>
+              <option value="sol">SOL (auto-swap via Jupiter)</option>
             </select>
           </label>
           {depositSource === "sol" ? (
@@ -605,25 +564,32 @@ export default function App() {
           )}
         </div>
         <button className="primary" onClick={handleDeposit} disabled={depositing}>
-          {depositing ? "Submitting..." : "Deposit"}
+          {depositing ? "Processing..." : "Deposit"}
         </button>
         {depositResult && <p className="result">{depositResult}</p>}
       </section>
 
       <section className="card">
         <div className="vaults-header">
-          <h2>Vaults</h2>
-          <p className="muted">
-            {wallet ? "Your deposits shown below" : "Connect wallet for balances"}
-            {" · "}
-            <span className="muted">Lend →</span> opens the protocol in a new tab to deposit.
-          </p>
+          <div>
+            <h2>All vaults</h2>
+            <p className="muted" style={{ marginTop: "2px" }}>
+              {sortedVaults.length} vaults
+              {!wallet && " · connect wallet to see your balances"}
+            </p>
+          </div>
         </div>
         <div className="table">
-          <div className="row header-row">
+          <div
+            className="row header-row"
+            style={{
+              gridTemplateColumns: wallet
+                ? "0.9fr 1.6fr 0.5fr 0.6fr 0.8fr 0.8fr 0.5fr 0.7fr 0.7fr 0.5fr"
+                : "0.9fr 1.6fr 0.5fr 0.6fr 0.8fr 0.8fr 0.5fr 0.5fr"
+            }}
+          >
             <span>Protocol</span>
-            <span>Pool</span>
-            <span>Vault</span>
+            <span>Pool / Vault</span>
             <span>Asset</span>
             <button
               type="button"
@@ -647,82 +613,91 @@ export default function App() {
               Liquidity{" "}
               <span className="sort-indicator">{sortIndicator("liquidityUsd")}</span>
             </button>
-            <span>Utilization</span>
-            <span>Lent</span>
-            <span>Available</span>
-            <span>Lend</span>
+            <span>Util</span>
+            {wallet && <span>Lent</span>}
+            {wallet && <span>Available</span>}
+            <span></span>
           </div>
           {pageVaults.map((vault) => {
-              const position = positions[vault.id];
-              return (
-                <div className="row" key={vault.id}>
-                  <span className="tag">
-                    {PROTOCOL_LABELS[vault.protocolId]}
-                  </span>
-                  <span>{vault.poolName}</span>
-                  <span>{vault.vaultName}</span>
-                  <span>{vault.assetSymbol}</span>
-                  <span className="strong">{formatPercent(vault.apyTotal)}</span>
-                  <span>{formatUsd(vault.tvlUsd)}</span>
-                  <span>{formatUsd(vault.liquidityUsd)}</span>
-                  <span>{formatPercent(vault.utilization * 100)}</span>
-                  <span>
-                    {wallet && position
-                      ? formatTokenAmount(
-                          position.depositedAmount,
-                          vault.assetSymbol
-                        )
-                      : "—"}
-                  </span>
-                  <span>
-                    {wallet && position
-                      ? formatTokenAmount(
-                          position.availableAmount,
-                          vault.assetSymbol
-                        )
-                      : "—"}
-                  </span>
-                  <span>
-                    <a
-                      href={vault.vaultUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="vault-link-button"
-                      title={`Lend ${vault.assetSymbol} on ${PROTOCOL_LABELS[vault.protocolId]} (opens in new tab)`}
-                    >
-                      Lend →
-                    </a>
-                  </span>
+            const position = positions[vault.id];
+            return (
+              <div
+                className="row"
+                key={vault.id}
+                style={{
+                  gridTemplateColumns: wallet
+                    ? "0.9fr 1.6fr 0.5fr 0.6fr 0.8fr 0.8fr 0.5fr 0.7fr 0.7fr 0.5fr"
+                    : "0.9fr 1.6fr 0.5fr 0.6fr 0.8fr 0.8fr 0.5fr 0.5fr"
+                }}
+              >
+                <span className="tag">
+                  {PROTOCOL_LABELS[vault.protocolId]}
+                </span>
+                <div>
+                  <strong style={{ fontSize: "13px" }}>{vault.vaultName}</strong>
+                  <div className="muted" style={{ fontSize: "11px" }}>{vault.poolName}</div>
                 </div>
-              );
-            })}
+                <span>{vault.assetSymbol}</span>
+                <span className="strong">{formatPercent(vault.apyTotal)}</span>
+                <span>{formatUsd(vault.tvlUsd)}</span>
+                <span>{formatUsd(vault.liquidityUsd)}</span>
+                <span>{formatPercent(vault.utilization * 100)}</span>
+                {wallet && (
+                  <span>
+                    {position
+                      ? formatTokenAmount(position.depositedAmount, vault.assetSymbol)
+                      : "—"}
+                  </span>
+                )}
+                {wallet && (
+                  <span>
+                    {position
+                      ? formatTokenAmount(position.availableAmount, vault.assetSymbol)
+                      : "—"}
+                  </span>
+                )}
+                <span>
+                  <a
+                    href={vault.vaultUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="vault-link-button"
+                    title={`Lend on ${PROTOCOL_LABELS[vault.protocolId]}`}
+                  >
+                    Lend&thinsp;→
+                  </a>
+                </span>
+              </div>
+            );
+          })}
         </div>
-        <div className="pagination">
-          <span className="muted">
-            Showing {sortedVaults.length === 0 ? 0 : pageStart + 1}-
-            {Math.min(pageStart + PAGE_SIZE, sortedVaults.length)} of{" "}
-            {sortedVaults.length}
-          </span>
-          <div className="pagination-controls">
-            <button
-              className="ghost"
-              onClick={() => setPageIndex(currentPage - 1)}
-              disabled={currentPage === 0}
-            >
-              Prev
-            </button>
+        {totalPages > 1 && (
+          <div className="pagination">
             <span className="muted">
-              Page {currentPage + 1} of {totalPages}
+              {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, sortedVaults.length)} of{" "}
+              {sortedVaults.length}
             </span>
-            <button
-              className="ghost"
-              onClick={() => setPageIndex(currentPage + 1)}
-              disabled={currentPage >= totalPages - 1}
-            >
-              Next
-            </button>
+            <div className="pagination-controls">
+              <button
+                className="ghost"
+                onClick={() => setPageIndex(currentPage - 1)}
+                disabled={currentPage === 0}
+              >
+                ← Prev
+              </button>
+              <span className="muted" style={{ fontSize: "12px" }}>
+                {currentPage + 1} / {totalPages}
+              </span>
+              <button
+                className="ghost"
+                onClick={() => setPageIndex(currentPage + 1)}
+                disabled={currentPage >= totalPages - 1}
+              >
+                Next →
+              </button>
+            </div>
           </div>
-        </div>
+        )}
       </section>
     </div>
   );
