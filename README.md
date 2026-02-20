@@ -1,7 +1,6 @@
 EasyHop Solana
 
 Hopper-style Solana lending vault aggregator focused on:
-- Solend
 - Kamino Lend
 
 This repo contains a lightweight API for vault/metrics data and a simple
@@ -36,7 +35,7 @@ Web (`apps/web/.env.example`)
 - `VITE_SOLANA_RPC_URL` Optional custom RPC for the web app.
 
 Notes
-- The API fetches live vault metrics for Solend and Kamino Lend.
+- The API fetches live vault metrics for Kamino Lend.
 - The API builds withdraw/swap/deposit transactions and the UI signs
   and submits them with the user wallet.
 - Cross-asset moves and SOL->token deposits use Jupiter swaps.
