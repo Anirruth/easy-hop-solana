@@ -71,7 +71,7 @@ positionsRouter.get("/", async (req, res) => {
 
     const positionsByVault = new Map<string, VaultPosition>();
 
-    const vaults = await getLiveVaults();
+    const vaults = await getLiveVaults({ allowStale: true });
     const solendVaults = vaults.filter((vault) => vault.protocolId === "solend");
     if (solendVaults.length) {
       try {

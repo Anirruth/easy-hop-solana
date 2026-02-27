@@ -6,7 +6,7 @@ export const vaultsRouter = Router();
 
 vaultsRouter.get("/", async (_req, res) => {
   try {
-    const liveVaults = await getLiveVaults();
+    const liveVaults = await getLiveVaults({ allowStale: true });
     res.json({ data: liveVaults });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load vaults";
@@ -16,7 +16,7 @@ vaultsRouter.get("/", async (_req, res) => {
 
 vaultsRouter.get("/:id", async (req, res) => {
   try {
-    const liveVaults = await getLiveVaults();
+    const liveVaults = await getLiveVaults({ allowStale: true });
     const vault = liveVaults.find((item) => item.id === req.params.id);
     if (!vault) {
       res.status(404).json({ error: "Vault not found" });
@@ -31,7 +31,7 @@ vaultsRouter.get("/:id", async (req, res) => {
 
 vaultsRouter.get("/:id/history", async (req, res) => {
   try {
-    const liveVaults = await getLiveVaults();
+    const liveVaults = await getLiveVaults({ allowStale: true });
     const vault = liveVaults.find((item) => item.id === req.params.id);
     if (!vault) {
       res.status(404).json({ error: "Vault not found" });

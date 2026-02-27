@@ -12,12 +12,14 @@ export type VaultMetric = {
   assetSymbol: string;
   assetMint: string;
   assetDecimals: number;
+  sharesMint?: string;
   vaultUrl: string;
   apyTotal: number;
   apyBase: number;
   apyRewards: number;
   tvlUsd: number;
   liquidityUsd: number;
+  borrowedUsd: number;
   utilization: number;
   updatedAt: string;
 };
@@ -33,6 +35,9 @@ export type MoveRequest = {
   toVaultId: string;
   amount: number;
   walletAddress: string;
+  slippagePct?: number;
+  priorityFeeMode?: "auto" | "low" | "off";
+  debugFee?: boolean;
 };
 
 export type MoveResponse = {

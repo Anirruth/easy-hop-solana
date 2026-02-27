@@ -13,8 +13,11 @@ const VAULT_CACHE_TTL_MS = 180_000;
 const EMPTY_CACHE_TTL_MS = 10_000;
 const SOLEND_API_TIMEOUT_MS = 5000;
 const SOLEND_MARKETS_TTL_MS = 10 * 60_000;
+const KAMINO_API_TIMEOUT_MS = 7000;
+const KAMINO_API_RETRIES = 1;
 let vaultCache: { data: VaultMetric[]; expires: number } | null = null;
 let solendMarketCache: { data: Map<string, string>; expires: number } | null = null;
+let vaultRefreshPromise: Promise<VaultMetric[]> | null = null;
 
 const safeNumber = (value: number) => (Number.isFinite(value) ? value : 0);
 
@@ -73,6 +76,38 @@ const mapWithConcurrency = async <T, R>(
   });
   await Promise.all(runners);
   return results;
+};
+
+const fetchWithTimeout = async (
+  url: string,
+  init: RequestInit = {},
+  timeoutMs = KAMINO_API_TIMEOUT_MS
+) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+const fetchWithRetry = async (
+  url: string,
+  init: RequestInit = {},
+  timeoutMs = KAMINO_API_TIMEOUT_MS,
+  retries = KAMINO_API_RETRIES
+) => {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await fetchWithTimeout(url, init, timeoutMs);
+    } catch (err) {
+      lastError = err;
+      if (attempt >= retries) break;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Fetch failed");
 };
 
 const toNumberOrZero = (value: unknown): number => {
@@ -230,6 +265,9 @@ async function buildSolendVaults(
           poolAddress === MAIN_POOL_ADDRESS.toBase58()
             ? overrides?.get(reserve.mintAddress)
             : undefined;
+        const effectiveTvlUsd = apiOverride?.tvlUsd ?? tvlUsd;
+        const effectiveLiquidityUsd = apiOverride?.liquidityUsd ?? liquidityUsd;
+        const borrowedUsd = clampUsd(effectiveTvlUsd - effectiveLiquidityUsd);
         const tokenName = pickDisplayName(
           [reserve.symbol, reserve.name],
           "Token"
@@ -248,8 +286,9 @@ async function buildSolendVaults(
           apyTotal: apiOverride?.apyTotal ?? safeNumber(reserve.supplyInterest.toNumber() * 100),
           apyBase: safeNumber(reserve.supplyInterest.toNumber() * 100),
           apyRewards: 0,
-          tvlUsd: apiOverride?.tvlUsd ?? tvlUsd,
-          liquidityUsd: apiOverride?.liquidityUsd ?? liquidityUsd,
+          tvlUsd: effectiveTvlUsd,
+          liquidityUsd: effectiveLiquidityUsd,
+          borrowedUsd,
           utilization: safeNumber(reserve.reserveUtilization.toNumber()),
           updatedAt: new Date().toISOString()
         });
@@ -265,58 +304,82 @@ async function buildSolendVaults(
 
 async function buildKaminoVaults(_connection: Connection): Promise<VaultMetric[]> {
   try {
-    const res = await fetch("https://api.kamino.finance/kvaults/vaults", {
+    const res = await fetchWithRetry("https://api.kamino.finance/kvaults/vaults", {
       headers: kaminoHeaders
     });
     if (!res.ok) return [];
     const list = (await res.json()) as Array<{
       address?: string;
-      state?: { name?: string; tokenMint?: string; tokenMintDecimals?: number };
+      state?: {
+        name?: string;
+        tokenMint?: string;
+        tokenMintDecimals?: number;
+        sharesMint?: string;
+      };
     }>;
     if (!Array.isArray(list)) return [];
 
     const vaults = await mapWithConcurrency(list, 4, async (vault) => {
-      if (!vault?.address || !vault?.state?.name) return null;
-      const metricsRes = await fetch(
-        `https://api.kamino.finance/kvaults/vaults/${vault.address}/metrics`,
-        { headers: kaminoHeaders }
-      );
-      if (!metricsRes.ok) return null;
-      const metrics = (await metricsRes.json()) as {
-        apy?: string;
-        apyActual?: string;
-        tokensAvailableUsd?: string;
-        tokensInvestedUsd?: string;
-      };
-      const availableUsd = toNumberOrZero(metrics.tokensAvailableUsd);
-      const investedUsd = toNumberOrZero(metrics.tokensInvestedUsd);
-      const tvlUsd = clampUsd(availableUsd + investedUsd);
-      const liquidityUsd = tvlUsd;
-      const apyRaw = toNumberOrZero(metrics.apy ?? metrics.apyActual);
-      const apyTotal = normalizeApy(apyRaw);
-      const poolName = "Kamino Lend";
-      const vaultName = vault.state.name;
-      const assetSymbol = extractSymbolFromName(vaultName);
-      const slug = slugify(vaultName);
-      return {
-        id: `kamino:${vault.address}`,
-        protocolId: "kamino",
-        protocolName: "Kamino Lend",
-        poolName,
-        vaultName,
-        category: "lending",
-        assetSymbol,
-        assetMint: vault.state.tokenMint ?? "",
-        assetDecimals: vault.state.tokenMintDecimals ?? 6,
-        vaultUrl: slug ? `https://kamino.com/lend/${slug}` : "https://kamino.com/lend",
-        apyTotal,
-        apyBase: apyTotal,
-        apyRewards: 0,
-        tvlUsd,
-        liquidityUsd,
-        utilization: tvlUsd > 0 ? investedUsd / tvlUsd : 0,
-        updatedAt: new Date().toISOString()
-      } satisfies VaultMetric;
+      try {
+        if (!vault?.address || !vault?.state?.name) return null;
+        let metrics: {
+          apy?: string;
+          apyActual?: string;
+          tokensAvailableUsd?: string;
+          tokensInvestedUsd?: string;
+        } | null = null;
+        try {
+          const metricsRes = await fetchWithRetry(
+            `https://api.kamino.finance/kvaults/vaults/${vault.address}/metrics`,
+            { headers: kaminoHeaders }
+          );
+          if (metricsRes.ok) {
+            metrics = (await metricsRes.json()) as {
+              apy?: string;
+              apyActual?: string;
+              tokensAvailableUsd?: string;
+              tokensInvestedUsd?: string;
+            };
+          }
+        } catch {
+          metrics = null;
+        }
+
+        const availableUsd = toNumberOrZero(metrics?.tokensAvailableUsd);
+        const investedUsd = toNumberOrZero(metrics?.tokensInvestedUsd);
+        const tvlUsd = clampUsd(availableUsd + investedUsd);
+        const liquidityUsd = clampUsd(availableUsd);
+        const borrowedUsd = clampUsd(investedUsd);
+        const apyRaw = toNumberOrZero(metrics?.apy ?? metrics?.apyActual);
+        const apyTotal = normalizeApy(apyRaw);
+        const poolName = "Kamino Lend";
+        const vaultName = vault.state.name;
+        const assetSymbol = extractSymbolFromName(vaultName);
+        const slug = slugify(vaultName);
+        return {
+          id: `kamino:${vault.address}`,
+          protocolId: "kamino",
+          protocolName: "Kamino Lend",
+          poolName,
+          vaultName,
+          category: "lending",
+          assetSymbol,
+          assetMint: vault.state.tokenMint ?? "",
+          assetDecimals: vault.state.tokenMintDecimals ?? 6,
+          sharesMint: vault.state.sharesMint ?? undefined,
+          vaultUrl: slug ? `https://kamino.com/lend/${slug}` : "https://kamino.com/lend",
+          apyTotal,
+          apyBase: apyTotal,
+          apyRewards: 0,
+          tvlUsd,
+          liquidityUsd,
+          borrowedUsd,
+          utilization: tvlUsd > 0 ? investedUsd / tvlUsd : 0,
+          updatedAt: new Date().toISOString()
+        } satisfies VaultMetric;
+      } catch {
+        return null;
+      }
     });
 
     return vaults;
@@ -327,29 +390,45 @@ async function buildKaminoVaults(_connection: Connection): Promise<VaultMetric[]
 }
 
 
-export async function getLiveVaults(): Promise<VaultMetric[]> {
-  const now = Date.now();
-  if (vaultCache && vaultCache.expires > now) return vaultCache.data;
-  const connection = getPrimaryConnection();
-  const fallbackConnection = getFallbackConnection();
-  const solendOverrides = await fetchSolendApiOverrides();
-  let solend = await buildSolendVaults(connection, solendOverrides);
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  let kamino = await buildKaminoVaults(connection);
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  if (fallbackConnection) {
-    if (!solend.length) {
-      solend = await buildSolendVaults(fallbackConnection, solendOverrides);
-    }
-    if (!kamino.length) {
-      kamino = await buildKaminoVaults(fallbackConnection, true);
-    }
-  }
+type LiveVaultOptions = { allowStale?: boolean };
 
-  const data = [...solend, ...kamino].filter((vault) => vault.liquidityUsd >= 100_000);
-  const ttl = data.length ? VAULT_CACHE_TTL_MS : EMPTY_CACHE_TTL_MS;
-  vaultCache = { data, expires: now + ttl };
-  return data;
+const refreshVaults = async (): Promise<VaultMetric[]> => {
+  if (vaultRefreshPromise) return vaultRefreshPromise;
+  vaultRefreshPromise = (async () => {
+    const now = Date.now();
+    const connection = getPrimaryConnection();
+    const fallbackConnection = getFallbackConnection();
+    let kamino = await buildKaminoVaults(connection);
+
+    if (fallbackConnection) {
+      if (!kamino.length) {
+        kamino = await buildKaminoVaults(fallbackConnection);
+      }
+    }
+
+    const data = kamino;
+    const ttl = data.length ? VAULT_CACHE_TTL_MS : EMPTY_CACHE_TTL_MS;
+    vaultCache = { data, expires: now + ttl };
+    return data;
+  })();
+
+  try {
+    return await vaultRefreshPromise;
+  } finally {
+    vaultRefreshPromise = null;
+  }
+};
+
+export async function getLiveVaults(options: LiveVaultOptions = {}): Promise<VaultMetric[]> {
+  const now = Date.now();
+  if (vaultCache && vaultCache.expires > now) {
+    return vaultCache.data.filter((vault) => vault.protocolId === "kamino");
+  }
+  if (options.allowStale && vaultCache) {
+    void refreshVaults().catch(() => {});
+    return vaultCache.data.filter((vault) => vault.protocolId === "kamino");
+  }
+  return refreshVaults();
 }
 
 export async function getVaultById(id: string): Promise<VaultMetric | undefined> {

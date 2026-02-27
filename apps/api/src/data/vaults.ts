@@ -19,6 +19,7 @@ export const vaults: VaultMetric[] = [
     apyRewards: 0.44,
     tvlUsd: 212_450_000,
     liquidityUsd: 48_120_000,
+    borrowedUsd: 164_330_000,
     utilization: 0.77,
     updatedAt: now
   },
@@ -38,6 +39,7 @@ export const vaults: VaultMetric[] = [
     apyRewards: 0,
     tvlUsd: 98_320_000,
     liquidityUsd: 21_670_000,
+    borrowedUsd: 76_650_000,
     utilization: 0.74,
     updatedAt: now
   },
@@ -57,6 +59,7 @@ export const vaults: VaultMetric[] = [
     apyRewards: 0.85,
     tvlUsd: 143_900_000,
     liquidityUsd: 32_410_000,
+    borrowedUsd: 111_490_000,
     utilization: 0.71,
     updatedAt: now
   },
@@ -76,6 +79,7 @@ export const vaults: VaultMetric[] = [
     apyRewards: 0.3,
     tvlUsd: 82_200_000,
     liquidityUsd: 18_900_000,
+    borrowedUsd: 63_300_000,
     utilization: 0.77,
     updatedAt: now
   }

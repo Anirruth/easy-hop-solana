@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Connection, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { fetchPositions, fetchVaults } from "./api";
 import { VaultMetric, VaultPosition } from "./types";
 import {
@@ -7,7 +8,19 @@ import {
   getWalletProvider,
   WalletProvider
 } from "./wallet";
-import { depositFunds, depositFundsFromSol, moveFunds } from "./move";
+import {
+  AccountSetupPreview,
+  FeeDiagnostics,
+  FundProgressEvent,
+  TransactionProgressEvent,
+  createDepositAccounts,
+  depositFundsFromSol,
+  moveFunds,
+  previewSolFundQuote,
+  previewDepositAccounts,
+  SolFundQuote,
+  withdrawFunds
+} from "./move";
 
 const formatUsd = (value: number) =>
   new Intl.NumberFormat("en-US", {
@@ -18,43 +31,100 @@ const formatUsd = (value: number) =>
 
 const formatPercent = (value: number) => `${value.toFixed(2)}%`;
 
-const formatTokenAmount = (value: number, symbol: string) =>
+  const formatTokenAmount = (value: number, symbol: string) =>
   `${new Intl.NumberFormat("en-US", {
     maximumFractionDigits: 4
   }).format(value)} ${symbol}`;
+const formatSol = (value: number) =>
+  `${new Intl.NumberFormat("en-US", {
+    maximumFractionDigits: 6
+  }).format(value)} SOL`;
+
+const SOL_MINT = "So11111111111111111111111111111111111111112";
+
+const ENV_RPC = import.meta.env.VITE_SOLANA_RPC_URL?.trim() ?? "";
+const DEFAULT_RPCS = (
+  ENV_RPC
+    ? [ENV_RPC]
+    : ["https://api.mainnet-beta.solana.com", "https://rpc.ankr.com/solana"]
+) as string[];
 
 const PROTOCOL_LABELS: Record<string, string> = {
-  solend: "Solend",
   kamino: "Kamino Lend"
 };
 
-const canMove = (fromVault?: VaultMetric, toVault?: VaultMetric) =>
-  Boolean(fromVault && toVault && fromVault.id !== toVault.id);
-
-type SortKey = "apyTotal" | "tvlUsd" | "liquidityUsd";
+type SortKey = "apyTotal" | "tvlUsd" | "liquidityUsd" | "borrowedUsd";
 const PAGE_SIZE = 25;
+type ProgressStatus = "pending" | "in_progress" | "confirmed" | "failed";
+type TxFlowStep = {
+  label: string;
+  status: ProgressStatus;
+  signature?: string;
+};
 
 export default function App() {
   const [vaults, setVaults] = useState<VaultMetric[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [fromVaultId, setFromVaultId] = useState("");
-  const [toVaultId, setToVaultId] = useState("");
   const [moveAmount, setMoveAmount] = useState("");
   const [depositVaultId, setDepositVaultId] = useState("");
-  const [depositAmount, setDepositAmount] = useState("");
   const [depositSolAmount, setDepositSolAmount] = useState("");
-  const [depositSource, setDepositSource] = useState<"asset" | "sol">("asset");
+  const [depositSource, setDepositSource] = useState<"vault" | "sol">("sol");
+  const [depositSlippage, setDepositSlippage] = useState("0.5");
+  const [depositPriorityFee, setDepositPriorityFee] = useState<"auto" | "low" | "off">("off");
+  const [depositSetup, setDepositSetup] = useState<AccountSetupPreview | null>(null);
+  const [depositSetupLoading, setDepositSetupLoading] = useState(false);
+  const [depositSetupError, setDepositSetupError] = useState<string | null>(null);
+  const [withdrawVaultId, setWithdrawVaultId] = useState("");
+  const [withdrawAmount, setWithdrawAmount] = useState("");
+  const [withdrawTarget, setWithdrawTarget] = useState<"asset" | "sol">("asset");
+  const [withdrawSlippage, setWithdrawSlippage] = useState("0.5");
+  const [withdrawPriorityFee, setWithdrawPriorityFee] = useState<"auto" | "low" | "off">("off");
   const [wallet, setWallet] = useState<WalletProvider | null>(null);
-  const [moveResult, setMoveResult] = useState<string | null>(null);
-  const [moving, setMoving] = useState(false);
   const [depositing, setDepositing] = useState(false);
   const [depositResult, setDepositResult] = useState<string | null>(null);
+  const [depositFlow, setDepositFlow] = useState<{
+    visible: boolean;
+    swap: ProgressStatus;
+    deposit: ProgressStatus;
+  }>({
+    visible: false,
+    swap: "pending",
+    deposit: "pending"
+  });
+  const [depositFeeDebug, setDepositFeeDebug] = useState(false);
+  const [depositFeeDetails, setDepositFeeDetails] = useState<FeeDiagnostics | null>(null);
+  const [solFundQuote, setSolFundQuote] = useState<SolFundQuote | null>(null);
+  const [solFundQuoteLoading, setSolFundQuoteLoading] = useState(false);
+  const [solFundQuoteError, setSolFundQuoteError] = useState<string | null>(null);
+  const [withdrawing, setWithdrawing] = useState(false);
+  const [withdrawResult, setWithdrawResult] = useState<string | null>(null);
+  const [withdrawFlow, setWithdrawFlow] = useState<TxFlowStep[]>([]);
+  const [withdrawFeeDebug, setWithdrawFeeDebug] = useState(false);
+  const [withdrawFeeDetails, setWithdrawFeeDetails] = useState<FeeDiagnostics | null>(null);
   const [positions, setPositions] = useState<Record<string, VaultPosition>>({});
   const [positionsLoading, setPositionsLoading] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>("apyTotal");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [pageIndex, setPageIndex] = useState(0);
+  const [activeAction, setActiveAction] = useState<"deposit" | "withdraw" | "hop">("deposit");
+  const [vaultQuery, setVaultQuery] = useState("");
+  const [selectedVaultId, setSelectedVaultId] = useState("");
+  const [hopFromVaultId, setHopFromVaultId] = useState("");
+  const [hopToVaultId, setHopToVaultId] = useState("");
+  const [hopSelectMode, setHopSelectMode] = useState<"from" | "to" | null>(null);
+  const [solBalance, setSolBalance] = useState<number | null>(null);
+  const [solBalanceLoading, setSolBalanceLoading] = useState(false);
+  const [solBalanceError, setSolBalanceError] = useState<string | null>(null);
+  const [hopping, setHopping] = useState(false);
+  const [hopResult, setHopResult] = useState<string | null>(null);
+  const [hopFlow, setHopFlow] = useState<TxFlowStep[]>([]);
+  const [hopAmount, setHopAmount] = useState("");
+  const [hopSlippage, setHopSlippage] = useState("0.5");
+  const [hopPriorityFee, setHopPriorityFee] = useState<"auto" | "low" | "off">("off");
+  const [hopFeeDebug, setHopFeeDebug] = useState(false);
+  const [hopFeeDetails, setHopFeeDetails] = useState<FeeDiagnostics | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -83,6 +153,79 @@ export default function App() {
     }
   }, []);
 
+  const refreshSolBalance = async (isMounted: () => boolean) => {
+    if (!wallet?.publicKey) return;
+    setSolBalanceLoading(true);
+    setSolBalanceError(null);
+    const fetchBalance = async () => {
+      for (const rpcUrl of DEFAULT_RPCS) {
+        try {
+          const connection = new Connection(rpcUrl, "confirmed");
+          const lamports = await connection.getBalance(wallet.publicKey!, "confirmed");
+          return lamports;
+        } catch {
+          continue;
+        }
+      }
+      throw new Error("All RPCs failed");
+    };
+    try {
+      const lamports = await fetchBalance();
+      if (isMounted()) {
+        setSolBalance(lamports / LAMPORTS_PER_SOL);
+      }
+    } catch {
+      if (isMounted()) {
+        setSolBalance(null);
+        setSolBalanceError("Failed to load balance. Set VITE_SOLANA_RPC_URL in env and refresh.");
+      }
+    } finally {
+      if (isMounted()) {
+        setSolBalanceLoading(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (!wallet?.publicKey) {
+      setSolBalance(null);
+      setSolBalanceError(null);
+      return;
+    }
+    let mounted = true;
+    refreshSolBalance(() => mounted);
+    return () => {
+      mounted = false;
+    };
+  }, [wallet?.publicKey?.toBase58()]);
+
+  const loadPositions = async (
+    walletAddress: string,
+    reportErrors = true,
+    isMounted: () => boolean = () => true
+  ) => {
+    setPositionsLoading(true);
+    try {
+      const data = await fetchPositions(walletAddress);
+      if (!isMounted()) return;
+      const mapped = data.reduce<Record<string, VaultPosition>>((acc, position) => {
+        acc[position.vaultId] = position;
+        return acc;
+      }, {});
+      setPositions(mapped);
+    } catch (err) {
+      if (reportErrors && isMounted()) {
+        setDepositResult(err instanceof Error ? err.message : "Failed to load positions.");
+      } else {
+        console.warn("Failed to refresh positions", err);
+      }
+    } finally {
+      if (isMounted()) {
+        setPositionsLoading(false);
+      }
+    }
+  };
+
   useEffect(() => {
     const walletAddress = wallet?.publicKey?.toBase58();
     if (!walletAddress) {
@@ -91,44 +234,37 @@ export default function App() {
     }
 
     let mounted = true;
-    setPositionsLoading(true);
-    fetchPositions(walletAddress)
-      .then((data) => {
-        if (!mounted) return;
-        const mapped = data.reduce<Record<string, VaultPosition>>(
-          (acc, position) => {
-            acc[position.vaultId] = position;
-            return acc;
-          },
-          {}
-        );
-        setPositions(mapped);
-      })
-      .catch((err) => {
-        if (mounted) {
-          setMoveResult(
-            err instanceof Error ? err.message : "Failed to load positions."
-          );
-        }
-      })
-      .finally(() => {
-        if (mounted) {
-          setPositionsLoading(false);
-        }
-      });
+    loadPositions(walletAddress, true, () => mounted);
 
     return () => {
       mounted = false;
     };
   }, [wallet?.publicKey?.toBase58()]);
 
+  const filteredVaults = useMemo(() => {
+    const query = vaultQuery.trim().toLowerCase();
+    if (!query) return vaults;
+    return vaults.filter((vault) => {
+      const haystack = [
+        vault.protocolName,
+        vault.poolName,
+        vault.vaultName,
+        vault.assetSymbol
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [vaults, vaultQuery]);
+
   const vaultOptions = useMemo(
     () =>
-      vaults.map((vault) => ({
+      filteredVaults.map((vault) => ({
         value: vault.id,
         label: `${vault.protocolName} • ${vault.poolName} • ${vault.vaultName} (${vault.assetSymbol})`
       })),
-    [vaults]
+    [filteredVaults]
   );
   const fromVaultOptions = useMemo(() => {
     if (!wallet) return vaultOptions;
@@ -143,11 +279,42 @@ export default function App() {
   }, [vaultOptions, vaults, positions, wallet]);
 
   const fromVault = vaults.find((vault) => vault.id === fromVaultId);
-  const toVault = vaults.find((vault) => vault.id === toVaultId);
   const depositVault = vaults.find((vault) => vault.id === depositVaultId);
+  const withdrawVault = vaults.find((vault) => vault.id === withdrawVaultId);
+  const selectedVault = vaults.find((vault) => vault.id === selectedVaultId);
+  const hopFromVault = vaults.find((vault) => vault.id === hopFromVaultId);
+  const hopToVault = vaults.find((vault) => vault.id === hopToVaultId);
   const fromPosition = fromVault ? positions[fromVault.id] : undefined;
   const availableAmount = fromPosition?.availableAmount ?? 0;
-  const depositedAmount = fromPosition?.depositedAmount ?? 0;
+  const withdrawPosition = withdrawVault ? positions[withdrawVault.id] : undefined;
+  const withdrawAvailable = withdrawPosition?.availableAmount ?? 0;
+  const showDepositSwap =
+    depositSource === "sol" ||
+    (depositSource === "vault" &&
+      Boolean(fromVault && selectedVault && fromVault.assetMint !== selectedVault.assetMint));
+  const showHopSwap =
+    Boolean(hopFromVault && hopToVault && hopFromVault.assetMint !== hopToVault.assetMint);
+  const actionPath = (() => {
+    if (activeAction === "deposit") {
+      if (!selectedVault) return "Select a vault to see the path.";
+      if (depositSource === "sol") {
+        return `SOL → ${selectedVault.assetSymbol} → ${selectedVault.vaultName}`;
+      }
+      if (!fromVault) return "Select a source vault to see the path.";
+      return `${fromVault.assetSymbol} → ${selectedVault.assetSymbol} → ${selectedVault.vaultName}`;
+    }
+    if (activeAction === "withdraw") {
+      if (!withdrawVault) return "Select a vault to see the path.";
+      return withdrawTarget === "sol"
+        ? `${withdrawVault.assetSymbol} → SOL`
+        : `${withdrawVault.assetSymbol} → Wallet`;
+    }
+    if (activeAction === "hop") {
+      if (!hopFromVault || !hopToVault) return "Select both source and destination vaults.";
+      return `${hopFromVault.assetSymbol} → ${hopToVault.assetSymbol} → ${hopToVault.vaultName}`;
+    }
+    return "";
+  })();
   useEffect(() => {
     if (!fromVault) {
       setMoveAmount("");
@@ -155,6 +322,57 @@ export default function App() {
     }
     setMoveAmount((current) => (current ? current : availableAmount.toString()));
   }, [fromVault?.id, availableAmount]);
+
+  useEffect(() => {
+    setDepositSetup(null);
+    setDepositSetupError(null);
+  }, [depositVaultId, wallet?.publicKey?.toBase58()]);
+
+  useEffect(() => {
+    if (selectedVaultId) {
+      setDepositVaultId(selectedVaultId);
+    }
+  }, [selectedVaultId]);
+
+  useEffect(() => {
+    if (!withdrawVault) {
+      setWithdrawAmount("");
+      return;
+    }
+    setWithdrawAmount((current) =>
+      current ? current : withdrawAvailable.toString()
+    );
+  }, [withdrawVault?.id, withdrawAvailable]);
+
+  useEffect(() => {
+    if (withdrawVaultId) {
+      setSelectedVaultId(withdrawVaultId);
+    }
+  }, [withdrawVaultId]);
+
+  useEffect(() => {
+    if (!hopFromVault) {
+      setHopAmount("");
+      return;
+    }
+    const sourceAvailable = positions[hopFromVault.id]?.availableAmount ?? 0;
+    setHopAmount((current) => (current ? current : sourceAvailable.toString()));
+  }, [hopFromVault?.id, positions]);
+
+  useEffect(() => {
+    if (depositSource !== "sol") {
+      setDepositFlow({
+        visible: false,
+        swap: "pending",
+        deposit: "pending"
+      });
+    }
+  }, [depositSource]);
+
+  useEffect(() => {
+    setSolFundQuote(null);
+    setSolFundQuoteError(null);
+  }, [depositVaultId, depositSolAmount, depositPriorityFee, depositSlippage, depositSource]);
 
   const kaminoPositionRows = useMemo(() => {
     return vaults
@@ -179,19 +397,23 @@ export default function App() {
   );
 
   const sortedVaults = useMemo(() => {
-    const sorted = vaults.slice().sort((a, b) => {
+    const sorted = filteredVaults.slice().sort((a, b) => {
       const av = a[sortKey] ?? 0;
       const bv = b[sortKey] ?? 0;
       const diff = av - bv;
       return sortDir === "asc" ? diff : -diff;
     });
     return sorted;
-  }, [vaults, sortKey, sortDir]);
+  }, [filteredVaults, sortKey, sortDir]);
 
   const totalPages = Math.max(1, Math.ceil(sortedVaults.length / PAGE_SIZE));
   const currentPage = Math.min(pageIndex, totalPages - 1);
   const pageStart = currentPage * PAGE_SIZE;
   const pageVaults = sortedVaults.slice(pageStart, pageStart + PAGE_SIZE);
+
+  useEffect(() => {
+    setPageIndex(0);
+  }, [vaultQuery]);
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -206,6 +428,46 @@ export default function App() {
   const sortIndicator = (key: SortKey) => {
     if (sortKey !== key) return "↕";
     return sortDir === "asc" ? "↑" : "↓";
+  };
+
+  const parseSlippage = (value: string) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) return null;
+    return parsed;
+  };
+
+  const formatFeeDiagnostics = (details: FeeDiagnostics | null) => {
+    if (!details) return null;
+    if (!details.transactions.length) return "No fee diagnostics available.";
+    return details.transactions
+      .map((tx) => {
+        const parts: string[] = [];
+        if (typeof tx.computeUnitPriceMicroLamports === "number") {
+          parts.push(`${tx.computeUnitPriceMicroLamports} µ-lamports/CU`);
+        } else {
+          parts.push("no CU price");
+        }
+        if (typeof tx.computeUnitLimit === "number") {
+          parts.push(`limit ${tx.computeUnitLimit}`);
+        }
+        if (typeof tx.estimatedPriorityFeeLamports === "number") {
+          parts.push(
+            `~${(tx.estimatedPriorityFeeLamports / 1_000_000_000).toFixed(6)} SOL`
+          );
+        }
+        return `${tx.label}: ${parts.join(", ")}`;
+      })
+      .join("\n");
+  };
+
+  const summarizeFeeDiagnostics = (details: FeeDiagnostics | null) => {
+    if (!details || !details.transactions.length) return null;
+    const totalLamports = details.transactions.reduce((acc, tx) => {
+      const fee = typeof tx.estimatedPriorityFeeLamports === "number" ? tx.estimatedPriorityFeeLamports : 0;
+      return acc + fee;
+    }, 0);
+    if (totalLamports <= 0) return null;
+    return `${(totalLamports / 1_000_000_000).toFixed(6)} SOL`;
   };
 
   const formatConnectError = (err: unknown) => {
@@ -238,6 +500,37 @@ export default function App() {
     }
   };
 
+  const mapProgressStatus = (
+    status: FundProgressEvent["status"] | TransactionProgressEvent["status"]
+  ): ProgressStatus => {
+    if (status === "confirmed") return "confirmed";
+    if (status === "failed") return "failed";
+    return "in_progress";
+  };
+
+  const flowStateLabel = (status: ProgressStatus) => {
+    if (status === "confirmed") return "Confirmed";
+    if (status === "failed") return "Failed";
+    if (status === "in_progress") return "In progress";
+    return "Waiting";
+  };
+
+  const upsertTxFlowStep = (
+    current: TxFlowStep[],
+    event: TransactionProgressEvent
+  ): TxFlowStep[] => {
+    const nextStep: TxFlowStep = {
+      label: event.label,
+      status: mapProgressStatus(event.status),
+      signature: event.signature
+    };
+    const existingIndex = current.findIndex((step) => step.label === event.label);
+    if (existingIndex === -1) return [...current, nextStep];
+    const next = current.slice();
+    next[existingIndex] = { ...next[existingIndex], ...nextStep };
+    return next;
+  };
+
   const handleConnect = async () => {
     try {
       const provider = await connectWallet();
@@ -245,7 +538,7 @@ export default function App() {
     } catch (err) {
       console.error("Wallet connect failed", err);
       const message = formatConnectError(err);
-      setMoveResult(message || "Failed to connect wallet.");
+      setDepositResult(message || "Failed to connect wallet.");
     }
   };
 
@@ -253,47 +546,6 @@ export default function App() {
     if (!wallet) return;
     await disconnectWallet(wallet);
     setWallet(null);
-  };
-
-  const handleMove = async () => {
-    if (!fromVault || !toVault) {
-      setMoveResult("Select both a source and destination vault.");
-      return;
-    }
-
-    if (availableAmount <= 0) {
-      setMoveResult("No available balance to move from this vault.");
-      return;
-    }
-
-    const amount = Number(moveAmount);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      setMoveResult("Enter a valid amount to move.");
-      return;
-    }
-    if (amount > availableAmount) {
-      setMoveResult("Amount exceeds available balance in this vault.");
-      return;
-    }
-
-    const provider = wallet ?? getWalletProvider();
-    if (!provider?.publicKey) {
-      setMoveResult("Connect your wallet to continue.");
-      return;
-    }
-
-    setMoving(true);
-    setMoveResult(null);
-    try {
-      await moveFunds(provider, fromVault, toVault, amount);
-      setMoveResult("Move complete. Funds deposited into the new vault.");
-    } catch (err) {
-      setMoveResult(
-        err instanceof Error ? err.message : "Failed to move position."
-      );
-    } finally {
-      setMoving(false);
-    }
   };
 
   const handleDeposit = async () => {
@@ -307,8 +559,16 @@ export default function App() {
       return;
     }
 
+    const slippagePct = parseSlippage(depositSlippage);
+    if (slippagePct === null) {
+      setDepositResult("Enter a valid slippage percentage (0-100).");
+      return;
+    }
+
     setDepositing(true);
     setDepositResult(null);
+    setDepositFeeDetails(null);
+    setDepositFlow((prev) => ({ ...prev, visible: false }));
     try {
       if (depositSource === "sol") {
         if (depositVault.protocolId !== "kamino") {
@@ -320,23 +580,312 @@ export default function App() {
           setDepositResult("Enter a valid SOL amount.");
           return;
         }
-        await depositFundsFromSol(provider, depositVault, amountSol);
-        setDepositResult("Deposit complete.");
-      } else {
-        const amount = Number(depositAmount);
-        if (!Number.isFinite(amount) || amount <= 0) {
-          setDepositResult("Enter a valid deposit amount.");
-          return;
+        const swapRequired = depositVault.assetMint !== SOL_MINT;
+        setDepositFlow({
+          visible: true,
+          swap: swapRequired ? "pending" : "confirmed",
+          deposit: "pending"
+        });
+        const diagnostics = await depositFundsFromSol(
+          provider,
+          depositVault,
+          amountSol,
+          slippagePct,
+          depositPriorityFee,
+          depositFeeDebug,
+          (event) => {
+            setDepositFlow((current) => ({
+              ...current,
+              [event.step]: mapProgressStatus(event.status)
+            }));
+            if (event.step === "swap" && event.status === "confirmed") {
+              setDepositResult("Swap confirmed. Depositing into vault...");
+            }
+            if (event.step === "deposit" && event.status === "confirmed") {
+              setDepositResult("Deposit transaction confirmed.");
+            }
+          }
+        );
+        if (depositFeeDebug) {
+          setDepositFeeDetails(diagnostics);
         }
-        await depositFunds(provider, depositVault, amount);
+        await loadPositions(provider.publicKey!.toBase58(), false);
+        setDepositFlow((current) => ({
+          ...current,
+          visible: true,
+          swap: swapRequired ? "confirmed" : current.swap,
+          deposit: "confirmed"
+        }));
         setDepositResult("Deposit complete.");
+        return;
       }
+
+      if (!fromVault) {
+        setDepositResult("Select a source vault to swap from.");
+        return;
+      }
+      if (fromVault.id === depositVault.id) {
+        setDepositResult("Source and destination vaults must be different.");
+        return;
+      }
+      if (availableAmount <= 0) {
+        setDepositResult("No available balance to move from this vault.");
+        return;
+      }
+      const amount = Number(moveAmount);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        setDepositResult("Enter a valid amount to move.");
+        return;
+      }
+      if (amount > availableAmount) {
+        setDepositResult("Amount exceeds available balance in this vault.");
+        return;
+      }
+      const diagnostics = await moveFunds(
+        provider,
+        fromVault,
+        depositVault,
+        amount,
+        slippagePct,
+        depositPriorityFee,
+        depositFeeDebug
+      );
+      if (depositFeeDebug) {
+        setDepositFeeDetails(diagnostics);
+      }
+      await loadPositions(provider.publicKey!.toBase58(), false);
+      setDepositResult("Move complete. Funds deposited into the selected vault.");
     } catch (err) {
+      if (depositSource === "sol") {
+        setDepositFlow((current) => ({
+          ...current,
+          visible: true,
+          swap: current.swap === "confirmed" ? "confirmed" : "failed",
+          deposit: current.swap === "confirmed" && current.deposit !== "confirmed"
+            ? "failed"
+            : current.deposit
+        }));
+      }
       setDepositResult(
         err instanceof Error ? err.message : "Failed to deposit into vault."
       );
     } finally {
       setDepositing(false);
+    }
+  };
+
+  const handlePreviewDepositAccounts = async () => {
+    if (!depositVault) {
+      setDepositSetupError("Select a vault to preview setup fees.");
+      return;
+    }
+    const walletAddress = wallet?.publicKey?.toBase58() ?? getWalletProvider()?.publicKey?.toBase58();
+    if (!walletAddress) {
+      setDepositSetupError("Connect your wallet to continue.");
+      return;
+    }
+    setDepositSetupLoading(true);
+    setDepositSetupError(null);
+    try {
+      const preview = await previewDepositAccounts(depositVault, walletAddress);
+      setDepositSetup(preview);
+    } catch (err) {
+      setDepositSetupError(
+        err instanceof Error ? err.message : "Failed to preview setup fees."
+      );
+    } finally {
+      setDepositSetupLoading(false);
+    }
+  };
+
+  const handleCreateDepositAccounts = async () => {
+    if (!depositVault) {
+      setDepositSetupError("Select a vault to create token accounts.");
+      return;
+    }
+    const provider = wallet ?? getWalletProvider();
+    if (!provider?.publicKey) {
+      setDepositSetupError("Connect your wallet to continue.");
+      return;
+    }
+    setDepositSetupLoading(true);
+    setDepositSetupError(null);
+    try {
+      const preview = await createDepositAccounts(provider, depositVault);
+      setDepositSetup(preview);
+    } catch (err) {
+      setDepositSetupError(
+        err instanceof Error ? err.message : "Failed to create token accounts."
+      );
+    } finally {
+      setDepositSetupLoading(false);
+    }
+  };
+
+  const handlePreviewSolFundQuote = async () => {
+    if (depositSource !== "sol") return;
+    if (!depositVault) {
+      setSolFundQuoteError("Select a destination vault first.");
+      return;
+    }
+    const provider = wallet ?? getWalletProvider();
+    if (!provider?.publicKey) {
+      setSolFundQuoteError("Connect your wallet to continue.");
+      return;
+    }
+    const amountSol = Number(depositSolAmount);
+    if (!Number.isFinite(amountSol) || amountSol <= 0) {
+      setSolFundQuoteError("Enter a valid SOL amount.");
+      return;
+    }
+    const slippagePct = parseSlippage(depositSlippage);
+    if (slippagePct === null) {
+      setSolFundQuoteError("Enter a valid slippage percentage (0-100).");
+      return;
+    }
+
+    setSolFundQuoteLoading(true);
+    setSolFundQuoteError(null);
+    try {
+      const quote = await previewSolFundQuote(
+        provider,
+        depositVault,
+        amountSol,
+        slippagePct,
+        depositPriorityFee
+      );
+      setSolFundQuote(quote);
+    } catch (err) {
+      setSolFundQuoteError(err instanceof Error ? err.message : "Failed to preview debit.");
+    } finally {
+      setSolFundQuoteLoading(false);
+    }
+  };
+
+  const handleWithdraw = async () => {
+    if (!withdrawVault) {
+      setWithdrawResult("Select a vault to withdraw from.");
+      return;
+    }
+    const provider = wallet ?? getWalletProvider();
+    if (!provider?.publicKey) {
+      setWithdrawResult("Connect your wallet to continue.");
+      return;
+    }
+    if (withdrawAvailable <= 0) {
+      setWithdrawResult("No available balance to withdraw from this vault.");
+      return;
+    }
+    const amount = Number(withdrawAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setWithdrawResult("Enter a valid withdraw amount.");
+      return;
+    }
+    if (amount > withdrawAvailable) {
+      setWithdrawResult("Amount exceeds available balance in this vault.");
+      return;
+    }
+    const slippagePct = parseSlippage(withdrawSlippage);
+    if (slippagePct === null) {
+      setWithdrawResult("Enter a valid slippage percentage (0-100).");
+      return;
+    }
+
+    setWithdrawing(true);
+    setWithdrawResult(null);
+    setWithdrawFlow([]);
+    setWithdrawFeeDetails(null);
+    try {
+      const diagnostics = await withdrawFunds(
+        provider,
+        withdrawVault,
+        amount,
+        withdrawTarget,
+        slippagePct,
+        withdrawPriorityFee,
+        withdrawFeeDebug,
+        (event) => {
+          setWithdrawFlow((current) => upsertTxFlowStep(current, event));
+        }
+      );
+      if (withdrawFeeDebug) {
+        setWithdrawFeeDetails(diagnostics);
+      }
+      await loadPositions(provider.publicKey!.toBase58(), false);
+      setWithdrawResult(
+        withdrawTarget === "sol"
+          ? "Withdraw complete. Funds swapped to SOL."
+          : "Withdraw complete. Funds returned to your wallet."
+      );
+    } catch (err) {
+      setWithdrawResult(
+        err instanceof Error ? err.message : "Failed to withdraw from vault."
+      );
+    } finally {
+      setWithdrawing(false);
+    }
+  };
+
+  const handleHop = async () => {
+    if (!hopFromVault || !hopToVault) {
+      setHopResult("Select both a source and destination vault.");
+      return;
+    }
+    if (hopFromVault.id === hopToVault.id) {
+      setHopResult("Source and destination vaults must be different.");
+      return;
+    }
+    const provider = wallet ?? getWalletProvider();
+    if (!provider?.publicKey) {
+      setHopResult("Connect your wallet to continue.");
+      return;
+    }
+    const slippagePct = parseSlippage(hopSlippage);
+    if (slippagePct === null) {
+      setHopResult("Enter a valid slippage percentage (0-100).");
+      return;
+    }
+    const amount = Number(hopAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setHopResult("Enter a valid amount to hop.");
+      return;
+    }
+    const sourcePosition = positions[hopFromVault.id];
+    const sourceAvailable = sourcePosition?.availableAmount ?? 0;
+    if (sourceAvailable <= 0) {
+      setHopResult("No available balance to move from this vault.");
+      return;
+    }
+    if (amount > sourceAvailable) {
+      setHopResult("Amount exceeds available balance in this vault.");
+      return;
+    }
+    setHopping(true);
+    setHopResult(null);
+    setHopFlow([]);
+    setHopFeeDetails(null);
+    try {
+      const diagnostics = await moveFunds(
+        provider,
+        hopFromVault,
+        hopToVault,
+        amount,
+        slippagePct,
+        hopPriorityFee,
+        hopFeeDebug,
+        (event) => {
+          setHopFlow((current) => upsertTxFlowStep(current, event));
+        }
+      );
+      if (hopFeeDebug) {
+        setHopFeeDetails(diagnostics);
+      }
+      await loadPositions(provider.publicKey!.toBase58(), false);
+      setHopResult("Hop complete. Funds moved into the destination vault.");
+    } catch (err) {
+      setHopResult(err instanceof Error ? err.message : "Failed to hop positions.");
+    } finally {
+      setHopping(false);
     }
   };
 
@@ -364,341 +913,898 @@ export default function App() {
   }
 
   return (
-    <div className="page">
-      <header className="header">
-        <div>
+    <div className="page layout">
+      <aside className="sidebar">
+        <div className="brand">
           <p className="eyebrow">EasyHop Solana</p>
-          <h1>Lending vault aggregator</h1>
+          <h1>Kamino Lend Console</h1>
           <p className="subhead">
-            Compare yields and move funds across Solend and Kamino Lend in one place.
+            Track positions, watch liquidity, and swap in or out of vaults fast.
           </p>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-          <div className="pill">Lending</div>
-          {wallet ? (
-            <button className="ghost" onClick={handleDisconnect}>
-              {truncateAddress(wallet.publicKey?.toBase58() ?? "")}
-            </button>
-          ) : (
-            <button className="primary" onClick={handleConnect}>
-              Connect
-            </button>
-          )}
-        </div>
-      </header>
 
-      {wallet && (
-        <section className="card">
-          <h2>Your positions</h2>
-          <p className="muted">Active Kamino Lend deposits detected from your wallet.</p>
-          {kaminoPositionsWithBalance.length > 0 ? (
-            <div className="table" style={{ marginTop: "14px" }}>
-              <div className="row header-row positions-row">
-                <span>Vault</span>
-                <span>Asset</span>
-                <span>Deposited</span>
-                <span>Available</span>
-                <span></span>
+        <section className="card sidebar-card">
+          <div className="wallet-block">
+            <div>
+              <span className="muted">Wallet</span>
+              <div className="wallet-address">
+                {wallet ? truncateAddress(wallet.publicKey?.toBase58() ?? "") : "Not connected"}
               </div>
+            </div>
+            {wallet ? (
+              <button className="ghost" onClick={handleDisconnect}>
+                Disconnect
+              </button>
+            ) : (
+              <button className="primary" onClick={handleConnect}>
+                Connect
+              </button>
+            )}
+          </div>
+          <div className="balance-row">
+            <div>
+              <span className="muted">SOL balance</span>
+              <span className="strong">
+                {solBalanceLoading
+                  ? "Loading..."
+                  : solBalance !== null
+                    ? `${solBalance.toFixed(4)} SOL`
+                    : "—"}
+              </span>
+            </div>
+            <button
+              className="ghost"
+              onClick={() => refreshSolBalance(() => true)}
+              disabled={!wallet || solBalanceLoading}
+            >
+              Refresh
+            </button>
+          </div>
+          {solBalanceError && <p className="error">{solBalanceError}</p>}
+        </section>
+
+        <section className="card sidebar-card">
+          <div className="sidebar-head">
+            <h2>Your positions</h2>
+            <p className="muted">Click a vault to withdraw.</p>
+          </div>
+          {!wallet && <p className="muted">Connect your wallet to load positions.</p>}
+          {wallet && kaminoPositionsWithBalance.length === 0 && (
+            <p className="muted">{positionsLoading ? "Scanning..." : "No active positions."}</p>
+          )}
+          {wallet && kaminoPositionsWithBalance.length > 0 && (
+            <div className="positions-list">
               {kaminoPositionsWithBalance.map((row) => (
-                <div key={row.vault.id} className="row positions-row">
+                <button
+                  key={row.vault.id}
+                  type="button"
+                  className={`position-item${withdrawVaultId === row.vault.id ? " active" : ""}`}
+                  onClick={() => {
+                    if (hopSelectMode === "to") return;
+                    setHopFromVaultId(row.vault.id);
+                    setHopAmount(row.available.toString());
+                    setActiveAction("hop");
+                    setHopSelectMode("to");
+                  }}
+                >
                   <div>
-                    <strong style={{ fontSize: "13px" }}>{row.vault.vaultName}</strong>
-                    <div className="muted" style={{ fontSize: "11px" }}>{row.vault.poolName}</div>
+                    <div className="position-title">{row.vault.vaultName}</div>
+                    <div className="muted">{row.vault.assetSymbol}</div>
                   </div>
-                  <span>{row.vault.assetSymbol}</span>
-                  <span style={{ fontWeight: 600 }}>
-                    {formatTokenAmount(row.deposited, row.vault.assetSymbol)}
-                  </span>
-                  <span>{formatTokenAmount(row.available, row.vault.assetSymbol)}</span>
-                  <span className="tag strong">Active</span>
-                </div>
+                  <div className="position-values">
+                    <span>{formatTokenAmount(row.available, row.vault.assetSymbol)}</span>
+                    <span className="muted">avail</span>
+                  </div>
+                </button>
               ))}
             </div>
-          ) : (
-            <p className="muted" style={{ marginTop: "12px" }}>
-              {positionsLoading ? "Scanning..." : "No active Kamino positions found."}
-            </p>
           )}
         </section>
-      )}
+      </aside>
 
-      <section className="card">
-        <h2>Move funds</h2>
-        <p className="muted">Withdraw from one vault and deposit into another. Swap included if assets differ.</p>
-        <div className="move-grid">
-          <label>
-            Source vault
-            <select
-              value={fromVaultId}
-              onChange={(event) => setFromVaultId(event.target.value)}
-            >
-              <option value="">Select source</option>
-              {fromVaultOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Destination vault
-            <select
-              value={toVaultId}
-              onChange={(event) => setToVaultId(event.target.value)}
-            >
-              <option value="">Select destination</option>
-              {vaultOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Amount
-            <input
-              type="number"
-              min="0"
-              step="any"
-              value={moveAmount}
-              onChange={(event) => setMoveAmount(event.target.value)}
-              placeholder="0.0"
-            />
-          </label>
-        </div>
-        {fromVault && (
-          <div className="position-summary">
-            <div>
-              <span className="muted">Deposited</span>
-              <span className="position-value">
-                {formatTokenAmount(depositedAmount, fromVault.assetSymbol)}
-              </span>
-            </div>
-            <div>
-              <span className="muted">Available</span>
-              <span className="position-value">
-                {formatTokenAmount(availableAmount, fromVault.assetSymbol)}
-              </span>
-            </div>
+      <main className="main">
+        <header className="header">
+          <div>
+            <p className="eyebrow">Vaults</p>
+            <h1>Kamino Lend vaults</h1>
+            <p className="subhead">Select a vault to fund it from SOL or another position.</p>
           </div>
-        )}
-        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-          <button
-            className="primary"
-            onClick={handleMove}
-            disabled={
-              moving ||
-              positionsLoading ||
-              availableAmount <= 0 ||
-              !canMove(fromVault, toVault)
-            }
-          >
-            {moving ? "Processing..." : "Move funds"}
-          </button>
-          {fromVault &&
-            toVault &&
-            fromVault.assetMint !== toVault.assetMint && (
-              <span className="muted" style={{ fontSize: "12px" }}>
-                Includes Jupiter swap
+          <div className="filter-field">
+            <input
+              type="search"
+              placeholder="Filter vaults (asset, pool, protocol)"
+              value={vaultQuery}
+              onChange={(event) => setVaultQuery(event.target.value)}
+            />
+            {vaultQuery && (
+              <span className="filter-count">
+                {filteredVaults.length}/{vaults.length}
               </span>
             )}
-        </div>
-        {moveResult && <p className="result">{moveResult}</p>}
-      </section>
-
-      <section className="card">
-        <h2>Deposit</h2>
-        <p className="muted">Deposit directly into any vault from your wallet or SOL balance.</p>
-        <div className="move-grid">
-          <label>
-            Vault
-            <select
-              value={depositVaultId}
-              onChange={(event) => setDepositVaultId(event.target.value)}
-            >
-              <option value="">Select vault</option>
-              {vaultOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Pay with
-            <select
-              value={depositSource}
-              onChange={(event) =>
-                setDepositSource(event.target.value === "sol" ? "sol" : "asset")
-              }
-            >
-              <option value="asset">Vault asset from wallet</option>
-              <option value="sol">SOL (auto-swap via Jupiter)</option>
-            </select>
-          </label>
-          {depositSource === "sol" ? (
-            <label>
-              SOL amount
-              <input
-                type="number"
-                min="0"
-                step="any"
-                value={depositSolAmount}
-                onChange={(event) => setDepositSolAmount(event.target.value)}
-                placeholder="0.0"
-              />
-            </label>
-          ) : (
-            <label>
-              Amount
-              <input
-                type="number"
-                min="0"
-                step="any"
-                value={depositAmount}
-                onChange={(event) => setDepositAmount(event.target.value)}
-                placeholder="0.0"
-              />
-            </label>
-          )}
-        </div>
-        <button className="primary" onClick={handleDeposit} disabled={depositing}>
-          {depositing ? "Processing..." : "Deposit"}
-        </button>
-        {depositResult && <p className="result">{depositResult}</p>}
-      </section>
-
-      <section className="card">
-        <div className="vaults-header">
-          <div>
-            <h2>All vaults</h2>
-            <p className="muted" style={{ marginTop: "2px" }}>
-              {sortedVaults.length} vaults
-              {!wallet && " · connect wallet to see your balances"}
-            </p>
           </div>
-        </div>
-        <div className="table">
-          <div
-            className="row header-row"
-            style={{
-              gridTemplateColumns: wallet
-                ? "0.9fr 1.6fr 0.5fr 0.6fr 0.8fr 0.8fr 0.5fr 0.7fr 0.7fr 0.5fr"
-                : "0.9fr 1.6fr 0.5fr 0.6fr 0.8fr 0.8fr 0.5fr 0.5fr"
-            }}
-          >
-            <span>Protocol</span>
-            <span>Pool / Vault</span>
-            <span>Asset</span>
-            <button
-              type="button"
-              className="sort-button"
-              onClick={() => handleSort("apyTotal")}
-            >
-              APY <span className="sort-indicator">{sortIndicator("apyTotal")}</span>
-            </button>
-            <button
-              type="button"
-              className="sort-button"
-              onClick={() => handleSort("tvlUsd")}
-            >
-              TVL <span className="sort-indicator">{sortIndicator("tvlUsd")}</span>
-            </button>
-            <button
-              type="button"
-              className="sort-button"
-              onClick={() => handleSort("liquidityUsd")}
-            >
-              Liquidity{" "}
-              <span className="sort-indicator">{sortIndicator("liquidityUsd")}</span>
-            </button>
-            <span>Util</span>
-            {wallet && <span>Lent</span>}
-            {wallet && <span>Available</span>}
-            <span></span>
+        </header>
+
+        <section className="card">
+          <div className="vaults-header">
+            <div>
+              <h2>All vaults</h2>
+              <p className="muted" style={{ marginTop: "2px" }}>
+                {sortedVaults.length} vaults
+              </p>
+            </div>
           </div>
-          {pageVaults.map((vault) => {
-            const position = positions[vault.id];
-            return (
-              <div
-                className="row"
-                key={vault.id}
-                style={{
-                  gridTemplateColumns: wallet
-                    ? "0.9fr 1.6fr 0.5fr 0.6fr 0.8fr 0.8fr 0.5fr 0.7fr 0.7fr 0.5fr"
-                    : "0.9fr 1.6fr 0.5fr 0.6fr 0.8fr 0.8fr 0.5fr 0.5fr"
-                }}
-              >
-                <span className="tag">
-                  {PROTOCOL_LABELS[vault.protocolId]}
-                </span>
-                <div>
-                  <strong style={{ fontSize: "13px" }}>{vault.vaultName}</strong>
-                  <div className="muted" style={{ fontSize: "11px" }}>{vault.poolName}</div>
-                </div>
-                <span>{vault.assetSymbol}</span>
-                <span className="strong">{formatPercent(vault.apyTotal)}</span>
-                <span>{formatUsd(vault.tvlUsd)}</span>
-                <span>{formatUsd(vault.liquidityUsd)}</span>
-                <span>{formatPercent(vault.utilization * 100)}</span>
-                {wallet && (
-                  <span>
-                    {position
-                      ? formatTokenAmount(position.depositedAmount, vault.assetSymbol)
-                      : "—"}
-                  </span>
-                )}
-                {wallet && (
-                  <span>
-                    {position
-                      ? formatTokenAmount(position.availableAmount, vault.assetSymbol)
-                      : "—"}
-                  </span>
-                )}
-                <span>
-                  <a
-                    href={vault.vaultUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="vault-link-button"
-                    title={`Lend on ${PROTOCOL_LABELS[vault.protocolId]}`}
-                  >
-                    Lend&thinsp;→
-                  </a>
-                </span>
-              </div>
-            );
-          })}
-        </div>
-        {totalPages > 1 && (
-          <div className="pagination">
-            <span className="muted">
-              {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, sortedVaults.length)} of{" "}
-              {sortedVaults.length}
-            </span>
-            <div className="pagination-controls">
+          <div className="table vault-table">
+            <div className="row header-row vault-row">
+              <span>Vault</span>
+              <span>Asset</span>
               <button
-                className="ghost"
-                onClick={() => setPageIndex(currentPage - 1)}
-                disabled={currentPage === 0}
+                type="button"
+                className="sort-button"
+                onClick={() => handleSort("apyTotal")}
               >
-                ← Prev
+                APY <span className="sort-indicator">{sortIndicator("apyTotal")}</span>
               </button>
-              <span className="muted" style={{ fontSize: "12px" }}>
-                {currentPage + 1} / {totalPages}
-              </span>
               <button
-                className="ghost"
-                onClick={() => setPageIndex(currentPage + 1)}
-                disabled={currentPage >= totalPages - 1}
+                type="button"
+                className="sort-button"
+                onClick={() => handleSort("liquidityUsd")}
               >
-                Next →
+                Liquidity{" "}
+                <span className="sort-indicator">{sortIndicator("liquidityUsd")}</span>
+              </button>
+              <button
+                type="button"
+                className="sort-button"
+                onClick={() => handleSort("borrowedUsd")}
+              >
+                Borrowed{" "}
+                <span className="sort-indicator">{sortIndicator("borrowedUsd")}</span>
+              </button>
+              <button
+                type="button"
+                className="sort-button"
+                onClick={() => handleSort("tvlUsd")}
+              >
+                TVL <span className="sort-indicator">{sortIndicator("tvlUsd")}</span>
+              </button>
+              <span>Util</span>
+              <span></span>
+            </div>
+            {pageVaults.map((vault) => {
+              const isActive = selectedVaultId === vault.id;
+              return (
+                <div
+                  key={vault.id}
+                  className={`row vault-row${isActive ? " selected" : ""}`}
+                  onClick={() => {
+                    if (activeAction === "hop" || hopSelectMode === "to") {
+                      setHopToVaultId(vault.id);
+                      setSelectedVaultId(vault.id);
+                      setHopSelectMode(null);
+                    } else {
+                      setSelectedVaultId(vault.id);
+                      setDepositVaultId(vault.id);
+                      setActiveAction("deposit");
+                    }
+                  }}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      if (activeAction === "hop" || hopSelectMode === "to") {
+                        setHopToVaultId(vault.id);
+                        setSelectedVaultId(vault.id);
+                        setHopSelectMode(null);
+                      } else {
+                        setSelectedVaultId(vault.id);
+                        setDepositVaultId(vault.id);
+                        setActiveAction("deposit");
+                      }
+                    }
+                  }}
+                >
+                  <div>
+                    <strong>{vault.vaultName}</strong>
+                    <div className="muted">{vault.poolName}</div>
+                  </div>
+                  <span>{vault.assetSymbol}</span>
+                  <span className="strong">{formatPercent(vault.apyTotal)}</span>
+                  <span>{formatUsd(vault.liquidityUsd)}</span>
+                  <span>{formatUsd(vault.borrowedUsd)}</span>
+                  <span>{formatUsd(vault.tvlUsd)}</span>
+                  <span>{formatPercent(vault.utilization * 100)}</span>
+                  <span>
+                    <a
+                      href={vault.vaultUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="vault-link-button"
+                      onClick={(event) => event.stopPropagation()}
+                      title={`Lend on ${PROTOCOL_LABELS[vault.protocolId]}`}
+                    >
+                      Open
+                    </a>
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          {totalPages > 1 && (
+            <div className="pagination">
+              <span className="muted">
+                {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, sortedVaults.length)} of{" "}
+                {sortedVaults.length}
+              </span>
+              <div className="pagination-controls">
+                <button
+                  className="ghost"
+                  onClick={() => setPageIndex(currentPage - 1)}
+                  disabled={currentPage === 0}
+                >
+                  ← Prev
+                </button>
+                <span className="muted" style={{ fontSize: "12px" }}>
+                  {currentPage + 1} / {totalPages}
+                </span>
+                <button
+                  className="ghost"
+                  onClick={() => setPageIndex(currentPage + 1)}
+                  disabled={currentPage >= totalPages - 1}
+                >
+                  Next →
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+
+      </main>
+
+      <aside className="rightbar">
+        <section className="card sidebar-card action-card">
+          <div className="action-head">
+            <div>
+              <h2>Vault actions</h2>
+              <p className="muted">Fund, withdraw, or hop between vaults.</p>
+            </div>
+            <div className="segmented">
+              <button
+                className={activeAction === "deposit" ? "active" : ""}
+                onClick={() => setActiveAction("deposit")}
+                type="button"
+              >
+                Fund
+              </button>
+              <button
+                className={activeAction === "withdraw" ? "active" : ""}
+                onClick={() => setActiveAction("withdraw")}
+                type="button"
+              >
+                Withdraw
+              </button>
+              <button
+                className={activeAction === "hop" ? "active" : ""}
+                onClick={() => setActiveAction("hop")}
+                type="button"
+              >
+                Hop
               </button>
             </div>
           </div>
-        )}
-      </section>
+
+          {activeAction === "deposit" && (
+            <>
+              {selectedVault ? (
+                <div className="selected-vault">
+                  <div>
+                    <div className="selected-title">{selectedVault.vaultName}</div>
+                    <div className="muted">{selectedVault.poolName}</div>
+                  </div>
+                  <span className="tag">{selectedVault.assetSymbol}</span>
+                </div>
+              ) : (
+                <p className="muted">Select a vault from the table to continue.</p>
+              )}
+              <div className="move-grid">
+                <label>
+                  Fund from
+                  <select
+                    value={depositSource}
+                    onChange={(event) =>
+                      setDepositSource(event.target.value === "sol" ? "sol" : "vault")
+                    }
+                  >
+                    <option value="sol">SOL balance (swap via Jupiter)</option>
+                    <option value="vault">Vault position</option>
+                  </select>
+                </label>
+                {depositSource === "vault" && (
+                  <label>
+                    Source vault
+                    <select
+                      value={fromVaultId}
+                      onChange={(event) => setFromVaultId(event.target.value)}
+                    >
+                      <option value="">Select source vault</option>
+                      {fromVaultOptions.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                {depositSource === "sol" ? (
+                  <label>
+                    SOL max spend
+                    <input
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={depositSolAmount}
+                      onChange={(event) => setDepositSolAmount(event.target.value)}
+                      placeholder="0.0"
+                    />
+                  </label>
+                ) : (
+                  <label>
+                    Amount
+                    <input
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={moveAmount}
+                      onChange={(event) => setMoveAmount(event.target.value)}
+                      placeholder="0.0"
+                    />
+                  </label>
+                )}
+                <label>
+                  Slippage (%)
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.1"
+                    value={depositSlippage}
+                    onChange={(event) => setDepositSlippage(event.target.value)}
+                    placeholder="0.5"
+                  />
+                </label>
+                <label>
+                  Priority fee
+                  <select
+                    value={depositPriorityFee}
+                    onChange={(event) =>
+                      setDepositPriorityFee(
+                        event.target.value === "low"
+                          ? "low"
+                          : event.target.value === "auto"
+                            ? "auto"
+                            : "off"
+                      )
+                    }
+                  >
+                    <option value="off">Off</option>
+                    <option value="low">Low</option>
+                    <option value="auto">Auto</option>
+                  </select>
+                </label>
+                <label>
+                  Fee diagnostics
+                  <select
+                    value={depositFeeDebug ? "on" : "off"}
+                    onChange={(event) => setDepositFeeDebug(event.target.value === "on")}
+                  >
+                    <option value="off">Off</option>
+                    <option value="on">On</option>
+                  </select>
+                </label>
+              </div>
+              {depositSource === "vault" && fromVault && (
+                <div className="position-summary">
+                  <div>
+                    <span className="muted">Available</span>
+                    <span className="position-value">
+                      {formatTokenAmount(availableAmount, fromVault.assetSymbol)}
+                    </span>
+                  </div>
+                </div>
+              )}
+              <div className="action-footer">
+                <button
+                  className="primary"
+                  onClick={handleDeposit}
+                  disabled={depositing || !selectedVault}
+                >
+                  {depositing ? "Processing..." : "Fund vault"}
+                </button>
+                {showDepositSwap && (
+                  <span className="inline-badge">Includes Jupiter swap</span>
+                )}
+              </div>
+              <div className="action-tools">
+                {depositSource === "sol" && (
+                  <button
+                    className="ghost"
+                    onClick={handlePreviewSolFundQuote}
+                    disabled={solFundQuoteLoading || !selectedVault}
+                  >
+                    {solFundQuoteLoading ? "Calculating..." : "Preview debit"}
+                  </button>
+                )}
+                <button
+                  className="ghost"
+                  onClick={handlePreviewDepositAccounts}
+                  disabled={depositSetupLoading || !selectedVault}
+                >
+                  {depositSetupLoading ? "Checking..." : "Preview setup fees"}
+                </button>
+                {depositSetup?.missingAccounts?.length ? (
+                  <button
+                    className="ghost"
+                    onClick={handleCreateDepositAccounts}
+                    disabled={depositSetupLoading || !selectedVault}
+                  >
+                    Create token accounts
+                  </button>
+                ) : null}
+              </div>
+              {depositSource === "sol" && solFundQuoteError && (
+                <p className="error">{solFundQuoteError}</p>
+              )}
+              {depositSource === "sol" && solFundQuote && (
+                <div className="quote-box">
+                  {solFundQuote.canProceed ? (
+                    <>
+                      <div className="quote-row">
+                        <span className="muted">Requested SOL</span>
+                        <span className="route-value">{formatSol(solFundQuote.requestedSol)}</span>
+                      </div>
+                      <div className="quote-row">
+                        <span className="muted">SOL used for swap</span>
+                        <span className="route-value">
+                          {formatSol(solFundQuote.swapInputSol ?? solFundQuote.requestedSol)}
+                        </span>
+                      </div>
+                      <div className="quote-row">
+                        <span className="muted">Estimated output</span>
+                        <span className="route-value">
+                          {solFundQuote.estimatedOutAmount?.toFixed(6)} {solFundQuote.estimatedOutSymbol}
+                        </span>
+                      </div>
+                      <div className="quote-row">
+                        <span className="muted">Estimated setup fee (one-time)</span>
+                        <span className="route-value">
+                          {formatSol(
+                            (solFundQuote.estimatedSetupLamports ?? 0) / 1_000_000_000
+                          )}
+                        </span>
+                      </div>
+                      <div className="quote-row">
+                        <span className="muted">Estimated network+priority fee</span>
+                        <span className="route-value">
+                          {formatSol(
+                            (solFundQuote.estimatedNetworkFeeLamports ?? 0) / 1_000_000_000
+                          )}
+                        </span>
+                      </div>
+                      <div className="quote-row">
+                        <span className="muted">Estimated total wallet debit</span>
+                        <span className="route-value">
+                          {formatSol(solFundQuote.estimatedTotalDebitSol ?? solFundQuote.requestedSol)}
+                        </span>
+                      </div>
+                      {!!solFundQuote.txPlan?.length && (
+                        <p className="muted quote-plan">
+                          Plan: {solFundQuote.txPlan.map((tx) => tx.label).join(" -> ")}
+                        </p>
+                      )}
+                    </>
+                  ) : (
+                    <p className="muted">
+                      {solFundQuote.reason === "insufficient_requested_sol"
+                        ? "Requested SOL is too small after one-time setup and network fees. Increase amount."
+                        : `Missing accounts: ${solFundQuote.missingAccountsCount ?? 0}. One-time rent: ${formatSol(
+                            (solFundQuote.rentLamports ?? 0) / 1_000_000_000
+                          )}. Create token accounts first.`}
+                    </p>
+                  )}
+                </div>
+              )}
+              {depositSource === "sol" && depositFlow.visible && (
+                <div className="flow-progress">
+                  <div className="flow-track">
+                    <div
+                      className={`flow-line${depositFlow.swap === "confirmed" || depositFlow.deposit !== "pending" ? " done" : ""}`}
+                    />
+                  </div>
+                  <div className="flow-steps">
+                    <div className={`flow-step ${depositFlow.swap}`}>
+                      <div className="flow-dot" />
+                      <div>
+                        <div className="flow-title">Swap SOL to vault token</div>
+                        <div className="muted flow-state">
+                          {depositFlow.swap === "pending"
+                            ? "Waiting"
+                            : depositFlow.swap === "in_progress"
+                              ? "In progress"
+                              : depositFlow.swap === "confirmed"
+                                ? "Confirmed"
+                                : "Failed"}
+                        </div>
+                      </div>
+                    </div>
+                    <div className={`flow-step ${depositFlow.deposit}`}>
+                      <div className="flow-dot" />
+                      <div>
+                        <div className="flow-title">Deposit token to vault</div>
+                        <div className="muted flow-state">
+                          {depositFlow.deposit === "pending"
+                            ? "Waiting"
+                            : depositFlow.deposit === "in_progress"
+                              ? "In progress"
+                              : depositFlow.deposit === "confirmed"
+                                ? "Confirmed"
+                                : "Failed"}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+              {depositSetupError && <p className="error">{depositSetupError}</p>}
+              {depositSetup && (
+                <p className="result">
+                  {depositSetup.missingAccounts.length === 0
+                    ? "All required token accounts already exist. No rent needed."
+                    : `Missing ${depositSetup.missingAccounts.length} token account(s). Estimated one-time rent: ~${depositSetup.totalRentSol.toFixed(4)} SOL.`}
+                </p>
+              )}
+              {depositResult && <p className="result">{depositResult}</p>}
+              {depositFeeDebug && depositFeeDetails && (
+                <p className="result" style={{ whiteSpace: "pre-line" }}>
+                  {formatFeeDiagnostics(depositFeeDetails)}
+                </p>
+              )}
+            </>
+          )}
+
+          {activeAction === "withdraw" && (
+            <>
+              <div className="move-grid">
+                <label>
+                  Vault
+                  <select
+                    value={withdrawVaultId}
+                    onChange={(event) => setWithdrawVaultId(event.target.value)}
+                  >
+                    <option value="">Select vault</option>
+                    {fromVaultOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Receive
+                  <select
+                    value={withdrawTarget}
+                    onChange={(event) =>
+                      setWithdrawTarget(event.target.value === "sol" ? "sol" : "asset")
+                    }
+                  >
+                    <option value="asset">Vault asset</option>
+                    <option value="sol">SOL (swap via Jupiter)</option>
+                  </select>
+                </label>
+                <label>
+                  Amount
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    value={withdrawAmount}
+                    onChange={(event) => setWithdrawAmount(event.target.value)}
+                    placeholder="0.0"
+                  />
+                </label>
+                <label>
+                  Slippage (%)
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.1"
+                    value={withdrawSlippage}
+                    onChange={(event) => setWithdrawSlippage(event.target.value)}
+                    placeholder="0.5"
+                  />
+                </label>
+                <label>
+                  Priority fee
+                  <select
+                    value={withdrawPriorityFee}
+                    onChange={(event) =>
+                      setWithdrawPriorityFee(
+                        event.target.value === "low"
+                          ? "low"
+                          : event.target.value === "auto"
+                            ? "auto"
+                            : "off"
+                      )
+                    }
+                  >
+                    <option value="off">Off</option>
+                    <option value="low">Low</option>
+                    <option value="auto">Auto</option>
+                  </select>
+                </label>
+                <label>
+                  Fee diagnostics
+                  <select
+                    value={withdrawFeeDebug ? "on" : "off"}
+                    onChange={(event) => setWithdrawFeeDebug(event.target.value === "on")}
+                  >
+                    <option value="off">Off</option>
+                    <option value="on">On</option>
+                  </select>
+                </label>
+              </div>
+              {withdrawVault && (
+                <div className="position-summary">
+                  <div>
+                    <span className="muted">Available</span>
+                    <span className="position-value">
+                      {formatTokenAmount(withdrawAvailable, withdrawVault.assetSymbol)}
+                    </span>
+                  </div>
+                </div>
+              )}
+              <div className="action-footer">
+                <button
+                  className="primary"
+                  onClick={handleWithdraw}
+                  disabled={withdrawing || positionsLoading || withdrawAvailable <= 0}
+                >
+                  {withdrawing ? "Processing..." : "Withdraw"}
+                </button>
+                {withdrawTarget === "sol" && (
+                  <span className="inline-badge">Includes Jupiter swap</span>
+                )}
+              </div>
+              {withdrawFlow.length > 0 && (
+                <div className="flow-progress">
+                  <div className="flow-steps">
+                    {withdrawFlow.map((step) => (
+                      <div key={step.label} className={`flow-step ${step.status}`}>
+                        <div className="flow-dot" />
+                        <div>
+                          <div className="flow-title">{step.label}</div>
+                          <div className="muted flow-state">{flowStateLabel(step.status)}</div>
+                          {step.signature && (
+                            <div className="muted flow-state">
+                              Signature: {truncateAddress(step.signature)}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {withdrawResult && <p className="result">{withdrawResult}</p>}
+              {withdrawFeeDebug && withdrawFeeDetails && (
+                <p className="result" style={{ whiteSpace: "pre-line" }}>
+                  {formatFeeDiagnostics(withdrawFeeDetails)}
+                </p>
+              )}
+            </>
+          )}
+
+          {activeAction === "hop" && (
+            <>
+              <div className="hop-selector">
+                <button
+                  type="button"
+                  className={`hop-card${hopSelectMode === "from" ? " active" : ""}`}
+                  onClick={() => setHopSelectMode("from")}
+                >
+                  <span className="muted">From vault</span>
+                  <span className="route-value">
+                    {hopFromVault ? hopFromVault.vaultName : "Select from positions"}
+                  </span>
+                </button>
+                <span className="hop-arrow">↓</span>
+                <button
+                  type="button"
+                  className={`hop-card${hopSelectMode === "to" ? " active" : ""}`}
+                  onClick={() => setHopSelectMode("to")}
+                >
+                  <span className="muted">Destination vault</span>
+                  <span className="route-value">
+                    {hopToVault ? hopToVault.vaultName : "Select from vault list"}
+                  </span>
+                </button>
+              </div>
+              <div className="move-grid">
+                <label>
+                  Amount
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    value={hopAmount}
+                    onChange={(event) => setHopAmount(event.target.value)}
+                    placeholder="0.0"
+                  />
+                </label>
+                <label>
+                  Slippage (%)
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.1"
+                    value={hopSlippage}
+                    onChange={(event) => setHopSlippage(event.target.value)}
+                    placeholder="0.5"
+                  />
+                </label>
+                <label>
+                  Priority fee
+                  <select
+                    value={hopPriorityFee}
+                    onChange={(event) =>
+                      setHopPriorityFee(
+                        event.target.value === "low"
+                          ? "low"
+                          : event.target.value === "auto"
+                            ? "auto"
+                            : "off"
+                      )
+                    }
+                  >
+                    <option value="off">Off</option>
+                    <option value="low">Low</option>
+                    <option value="auto">Auto</option>
+                  </select>
+                </label>
+                <label>
+                  Fee diagnostics
+                  <select
+                    value={hopFeeDebug ? "on" : "off"}
+                    onChange={(event) => setHopFeeDebug(event.target.value === "on")}
+                  >
+                    <option value="off">Off</option>
+                    <option value="on">On</option>
+                  </select>
+                </label>
+              </div>
+              <div className="action-footer">
+                <button className="primary" onClick={handleHop} disabled={hopping}>
+                  {hopping ? "Processing..." : "Hop vaults"}
+                </button>
+                {showHopSwap && (
+                  <span className="inline-badge">Includes Jupiter swap</span>
+                )}
+              </div>
+              {hopFlow.length > 0 && (
+                <div className="flow-progress">
+                  <div className="flow-steps">
+                    {hopFlow.map((step) => (
+                      <div key={step.label} className={`flow-step ${step.status}`}>
+                        <div className="flow-dot" />
+                        <div>
+                          <div className="flow-title">{step.label}</div>
+                          <div className="muted flow-state">{flowStateLabel(step.status)}</div>
+                          {step.signature && (
+                            <div className="muted flow-state">
+                              Signature: {truncateAddress(step.signature)}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {hopResult && <p className="result">{hopResult}</p>}
+              {hopFeeDebug && hopFeeDetails && (
+                <p className="result" style={{ whiteSpace: "pre-line" }}>
+                  {formatFeeDiagnostics(hopFeeDetails)}
+                </p>
+              )}
+            </>
+          )}
+        </section>
+
+        <section className="card sidebar-card">
+          <div className="sidebar-head">
+            <h2>Route</h2>
+            <p className="muted">Preview the swap path and fees.</p>
+          </div>
+          <div className="route-box">
+            <div className="route-path">{actionPath}</div>
+            <div className="route-meta">
+              <div>
+                <span className="muted">Slippage</span>
+                <span className="route-value">
+                  {activeAction === "deposit"
+                    ? depositSlippage
+                    : activeAction === "withdraw"
+                      ? withdrawSlippage
+                      : hopSlippage}
+                  %
+                </span>
+              </div>
+              <div>
+                <span className="muted">Priority fee</span>
+                <span className="route-value">
+                  {activeAction === "deposit"
+                    ? depositPriorityFee
+                    : activeAction === "withdraw"
+                      ? withdrawPriorityFee
+                      : hopPriorityFee}
+                </span>
+              </div>
+              <div>
+                <span className="muted">Est. priority fee</span>
+                <span className="route-value">
+                  {activeAction === "deposit"
+                    ? summarizeFeeDiagnostics(depositFeeDetails) ?? "—"
+                    : activeAction === "withdraw"
+                      ? summarizeFeeDiagnostics(withdrawFeeDetails) ?? "—"
+                      : summarizeFeeDiagnostics(hopFeeDetails) ?? "—"}
+                </span>
+              </div>
+            </div>
+            {showDepositSwap && activeAction === "deposit" && (
+              <div className="inline-badge">Includes Jupiter swap</div>
+            )}
+            {activeAction === "withdraw" && withdrawTarget === "sol" && (
+              <div className="inline-badge">Includes Jupiter swap</div>
+            )}
+            {activeAction === "hop" && showHopSwap && (
+              <div className="inline-badge">Includes Jupiter swap</div>
+            )}
+          </div>
+        </section>
+
+        <section className="card sidebar-card">
+          <div className="sidebar-head">
+            <h2>Selected vault</h2>
+            <p className="muted">Key metrics for the vault in focus.</p>
+          </div>
+          {selectedVault ? (
+            <div className="metric-list">
+              <div>
+                <span className="muted">Asset</span>
+                <span className="route-value">{selectedVault.assetSymbol}</span>
+              </div>
+              <div>
+                <span className="muted">APY</span>
+                <span className="route-value">{formatPercent(selectedVault.apyTotal)}</span>
+              </div>
+              <div>
+                <span className="muted">Liquidity</span>
+                <span className="route-value">{formatUsd(selectedVault.liquidityUsd)}</span>
+              </div>
+              <div>
+                <span className="muted">Borrowed</span>
+                <span className="route-value">{formatUsd(selectedVault.borrowedUsd)}</span>
+              </div>
+              <div>
+                <span className="muted">Utilization</span>
+                <span className="route-value">{formatPercent(selectedVault.utilization * 100)}</span>
+              </div>
+            </div>
+          ) : (
+            <p className="muted">Select a vault in the table.</p>
+          )}
+        </section>
+      </aside>
     </div>
   );
 }
