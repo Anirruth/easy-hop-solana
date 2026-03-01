@@ -44,13 +44,18 @@ const formatSol = (value: number) =>
   }).format(value)} SOL`;
 
 const toBaseUnits = (amount: number, decimals: number) =>
-  Math.round(amount * 10 ** decimals);
+  Math.floor(Math.max(0, amount) * 10 ** decimals + Number.EPSILON);
 
 const toInputAmount = (amount: number, decimals: number) => {
   if (!Number.isFinite(amount) || amount <= 0) return "0";
   const precision = Math.min(12, Math.max(0, decimals));
-  return amount.toFixed(precision).replace(/\.?0+$/, "");
+  const factor = 10 ** precision;
+  const roundedDown = Math.floor(amount * factor + Number.EPSILON) / factor;
+  return roundedDown.toFixed(precision).replace(/\.?0+$/, "");
 };
+
+const exceedsAvailableBalance = (amount: number, available: number) =>
+  amount - available > Math.max(1e-9, Math.abs(available) * 1e-9);
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 
@@ -65,8 +70,9 @@ const PROTOCOL_LABELS: Record<string, string> = {
   kamino: "Kamino Lend"
 };
 
-type SortKey = "apyTotal" | "tvlUsd" | "liquidityUsd" | "borrowedUsd";
+type SortKey = "apyTotal" | "tvlUsd";
 const PAGE_SIZE = 25;
+const MIN_VAULT_TVL_USD = 100_000;
 type ProgressStatus = "pending" | "in_progress" | "confirmed" | "failed";
 type TxFlowStep = {
   label: string;
@@ -344,10 +350,20 @@ export default function App() {
     };
   }, [wallet?.publicKey?.toBase58()]);
 
+  const eligibleVaults = useMemo(
+    () => vaults.filter((vault) => Number.isFinite(vault.tvlUsd) && vault.tvlUsd >= MIN_VAULT_TVL_USD),
+    [vaults]
+  );
+
+  const eligibleVaultIds = useMemo(
+    () => new Set(eligibleVaults.map((vault) => vault.id)),
+    [eligibleVaults]
+  );
+
   const filteredVaults = useMemo(() => {
     const query = vaultQuery.trim().toLowerCase();
-    if (!query) return vaults;
-    return vaults.filter((vault) => {
+    if (!query) return eligibleVaults;
+    return eligibleVaults.filter((vault) => {
       const haystack = [
         vault.protocolName,
         vault.poolName,
@@ -359,7 +375,7 @@ export default function App() {
         .toLowerCase();
       return haystack.includes(query);
     });
-  }, [vaults, vaultQuery]);
+  }, [eligibleVaults, vaultQuery]);
 
   const vaultOptions = useMemo(
     () =>
@@ -371,7 +387,7 @@ export default function App() {
   );
   const fromVaultOptions = useMemo(() => {
     if (!wallet) return vaultOptions;
-    const withPositions = vaults.filter(
+    const withPositions = eligibleVaults.filter(
       (vault) => (positions[vault.id]?.depositedAmount ?? 0) > 0
     );
     if (!withPositions.length) return vaultOptions;
@@ -379,13 +395,13 @@ export default function App() {
       value: vault.id,
       label: `${vault.protocolName} • ${vault.poolName} • ${vault.vaultName} (${vault.assetSymbol})`
     }));
-  }, [vaultOptions, vaults, positions, wallet]);
+  }, [eligibleVaults, vaultOptions, positions, wallet]);
 
-  const depositVault = vaults.find((vault) => vault.id === depositVaultId);
-  const withdrawVault = vaults.find((vault) => vault.id === withdrawVaultId);
-  const selectedVault = vaults.find((vault) => vault.id === selectedVaultId);
-  const hopFromVault = vaults.find((vault) => vault.id === hopFromVaultId);
-  const hopToVault = vaults.find((vault) => vault.id === hopToVaultId);
+  const depositVault = eligibleVaults.find((vault) => vault.id === depositVaultId);
+  const withdrawVault = eligibleVaults.find((vault) => vault.id === withdrawVaultId);
+  const selectedVault = eligibleVaults.find((vault) => vault.id === selectedVaultId);
+  const hopFromVault = eligibleVaults.find((vault) => vault.id === hopFromVaultId);
+  const hopToVault = eligibleVaults.find((vault) => vault.id === hopToVaultId);
   const withdrawPosition = withdrawVault ? positions[withdrawVault.id] : undefined;
   const withdrawAvailable = withdrawPosition?.availableAmount ?? 0;
   const hopAvailable = hopFromVault ? positions[hopFromVault.id]?.availableAmount ?? 0 : 0;
@@ -522,12 +538,20 @@ export default function App() {
   }, [withdrawAmount]);
 
   useEffect(() => {
+    if (depositVaultId && !eligibleVaultIds.has(depositVaultId)) setDepositVaultId("");
+    if (withdrawVaultId && !eligibleVaultIds.has(withdrawVaultId)) setWithdrawVaultId("");
+    if (selectedVaultId && !eligibleVaultIds.has(selectedVaultId)) setSelectedVaultId("");
+    if (hopFromVaultId && !eligibleVaultIds.has(hopFromVaultId)) setHopFromVaultId("");
+    if (hopToVaultId && !eligibleVaultIds.has(hopToVaultId)) setHopToVaultId("");
+  }, [depositVaultId, eligibleVaultIds, hopFromVaultId, hopToVaultId, selectedVaultId, withdrawVaultId]);
+
+  useEffect(() => {
     setCloseAccountsResult(null);
     setCloseAccountsFeeDetails(null);
   }, [activeAction]);
 
   const kaminoPositionRows = useMemo(() => {
-    return vaults
+    return eligibleVaults
       .filter((vault) => vault.protocolId === "kamino")
       .map((vault) => {
         const position = positions[vault.id];
@@ -541,7 +565,7 @@ export default function App() {
         };
       })
       .sort((a, b) => b.deposited - a.deposited);
-  }, [vaults, positions]);
+  }, [eligibleVaults, positions]);
 
   const kaminoPositionsWithBalance = useMemo(
     () => kaminoPositionRows.filter((row) => row.hasBalance),
@@ -580,6 +604,18 @@ export default function App() {
   const sortIndicator = (key: SortKey) => {
     if (sortKey !== key) return "↕";
     return sortDir === "asc" ? "↑" : "↓";
+  };
+
+  const selectVaultFromTable = (vault: VaultMetric) => {
+    if (activeAction === "hop" || hopSelectMode === "to") {
+      setHopToVaultId(vault.id);
+      setSelectedVaultId(vault.id);
+      setHopSelectMode(null);
+      return;
+    }
+    setSelectedVaultId(vault.id);
+    setDepositVaultId(vault.id);
+    setActiveAction("deposit");
   };
 
   const parseSlippage = (value: string) => {
@@ -960,10 +996,11 @@ export default function App() {
       setWithdrawResult("Enter a valid withdraw amount.");
       return;
     }
-    if (amount > withdrawAvailable) {
+    if (exceedsAvailableBalance(amount, withdrawAvailable)) {
       setWithdrawResult("Amount exceeds available balance in this vault.");
       return;
     }
+    const requestedAmount = Math.min(amount, withdrawAvailable);
     const slippagePct = parseSlippage(withdrawSlippage);
     if (slippagePct === null) {
       setWithdrawResult("Enter a valid slippage percentage (0-100).");
@@ -986,7 +1023,7 @@ export default function App() {
       const diagnostics = await withdrawFunds(
         provider,
         withdrawVault,
-        amount,
+        requestedAmount,
         finalDestination,
         slippagePct,
         withdrawPriorityFee,
@@ -1007,7 +1044,7 @@ export default function App() {
           afterWithdrawSourceBalanceBase > beforeWithdrawSourceBalanceBase
             ? afterWithdrawSourceBalanceBase - beforeWithdrawSourceBalanceBase
             : 0n;
-        await runManualSwap(amount, {
+        await runManualSwap(requestedAmount, {
           propagateError: true,
           amountBaseOverride:
             withdrawnSourceBase > 0n ? Number(withdrawnSourceBase) : undefined,
@@ -1114,17 +1151,18 @@ export default function App() {
       setHopResult("No available balance to move from this vault.");
       return;
     }
-    if (amount > sourceAvailable) {
+    if (exceedsAvailableBalance(amount, sourceAvailable)) {
       setHopResult("Amount exceeds available balance in this vault.");
       return;
     }
+    const hopRequestedAmount = Math.min(amount, sourceAvailable);
     setHopping(true);
     setHopResult(null);
     setHopFlow([]);
     setHopFeeDetails(null);
     try {
       const closeSourceAccounts =
-        toBaseUnits(amount, hopFromVault.assetDecimals) >=
+        toBaseUnits(hopRequestedAmount, hopFromVault.assetDecimals) >=
         toBaseUnits(sourceAvailable, hopFromVault.assetDecimals);
       try {
         setHopFlow((current) =>
@@ -1164,7 +1202,7 @@ export default function App() {
       const withdrawDiagnostics = await withdrawFunds(
         provider,
         hopFromVault,
-        amount,
+        hopRequestedAmount,
         "asset",
         slippagePct,
         hopPriorityFee,
@@ -1187,12 +1225,12 @@ export default function App() {
           ? afterWithdrawSourceBalanceBase - beforeWithdrawSourceBalanceBase
           : 0n;
 
-      let depositAmount = amount;
+      let depositAmount = hopRequestedAmount;
       if (hopFromVault.assetMint !== hopToVault.assetMint) {
         const swapInputBase =
           withdrawnSourceBase > 0n
             ? Number(withdrawnSourceBase)
-            : toBaseUnits(amount, hopFromVault.assetDecimals);
+            : toBaseUnits(hopRequestedAmount, hopFromVault.assetDecimals);
         if (!Number.isFinite(swapInputBase) || swapInputBase <= 0) {
           throw new Error("No source tokens available to swap after withdraw.");
         }
@@ -1426,7 +1464,7 @@ export default function App() {
             />
             {vaultQuery && (
               <span className="filter-count">
-                {filteredVaults.length}/{vaults.length}
+                {filteredVaults.length}/{eligibleVaults.length}
               </span>
             )}
           </div>
@@ -1437,7 +1475,7 @@ export default function App() {
             <div>
               <h2>All vaults</h2>
               <p className="muted" style={{ marginTop: "2px" }}>
-                {sortedVaults.length} vaults
+                {sortedVaults.length} vaults (TVL ≥ {formatUsd(MIN_VAULT_TVL_USD)})
               </p>
             </div>
           </div>
@@ -1455,27 +1493,10 @@ export default function App() {
               <button
                 type="button"
                 className="sort-button"
-                onClick={() => handleSort("liquidityUsd")}
-              >
-                Liquidity{" "}
-                <span className="sort-indicator">{sortIndicator("liquidityUsd")}</span>
-              </button>
-              <button
-                type="button"
-                className="sort-button"
-                onClick={() => handleSort("borrowedUsd")}
-              >
-                Borrowed{" "}
-                <span className="sort-indicator">{sortIndicator("borrowedUsd")}</span>
-              </button>
-              <button
-                type="button"
-                className="sort-button"
                 onClick={() => handleSort("tvlUsd")}
               >
                 TVL <span className="sort-indicator">{sortIndicator("tvlUsd")}</span>
               </button>
-              <span>Util</span>
               <span></span>
             </div>
             {pageVaults.map((vault) => {
@@ -1484,43 +1505,25 @@ export default function App() {
                 <div
                   key={vault.id}
                   className={`row vault-row${isActive ? " selected" : ""}`}
-                  onClick={() => {
-                    if (activeAction === "hop" || hopSelectMode === "to") {
-                      setHopToVaultId(vault.id);
-                      setSelectedVaultId(vault.id);
-                      setHopSelectMode(null);
-                    } else {
-                      setSelectedVaultId(vault.id);
-                      setDepositVaultId(vault.id);
-                      setActiveAction("deposit");
-                    }
-                  }}
+                  onClick={() => selectVaultFromTable(vault)}
                   role="button"
                   tabIndex={0}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") {
-                      if (activeAction === "hop" || hopSelectMode === "to") {
-                        setHopToVaultId(vault.id);
-                        setSelectedVaultId(vault.id);
-                        setHopSelectMode(null);
-                      } else {
-                        setSelectedVaultId(vault.id);
-                        setDepositVaultId(vault.id);
-                        setActiveAction("deposit");
-                      }
+                      selectVaultFromTable(vault);
                     }
                   }}
                 >
-                  <div>
-                    <strong>{vault.vaultName}</strong>
-                    <div className="muted">{vault.poolName}</div>
+                  <div className="vault-main">
+                    <strong className="vault-title">{vault.vaultName}</strong>
+                    <div className="vault-subline">
+                      <span className="muted">{vault.poolName}</span>
+                      <span className="tag">{PROTOCOL_LABELS[vault.protocolId]}</span>
+                    </div>
                   </div>
-                  <span>{vault.assetSymbol}</span>
-                  <span className="strong">{formatPercent(vault.apyTotal)}</span>
-                  <span>{formatUsd(vault.liquidityUsd)}</span>
-                  <span>{formatUsd(vault.borrowedUsd)}</span>
-                  <span>{formatUsd(vault.tvlUsd)}</span>
-                  <span>{formatPercent(vault.utilization * 100)}</span>
+                  <span className="vault-asset">{vault.assetSymbol}</span>
+                  <span className="vault-metric strong">{formatPercent(vault.apyTotal)}</span>
+                  <span className="vault-metric">{formatUsd(vault.tvlUsd)}</span>
                   <span>
                     <a
                       href={vault.vaultUrl}
@@ -1536,6 +1539,9 @@ export default function App() {
                 </div>
               );
             })}
+            {pageVaults.length === 0 && (
+              <div className="row vault-empty">No vaults match the current filter.</div>
+            )}
           </div>
           {totalPages > 1 && (
             <div className="pagination">
@@ -2341,7 +2347,7 @@ export default function App() {
         <section className="card sidebar-card">
           <div className="sidebar-head">
             <h2>Selected vault</h2>
-            <p className="muted">Key metrics for the vault in focus.</p>
+            <p className="muted">Quick details for the vault in focus.</p>
           </div>
           {selectedVault ? (
             <div className="metric-list">
@@ -2354,16 +2360,8 @@ export default function App() {
                 <span className="route-value">{formatPercent(selectedVault.apyTotal)}</span>
               </div>
               <div>
-                <span className="muted">Liquidity</span>
-                <span className="route-value">{formatUsd(selectedVault.liquidityUsd)}</span>
-              </div>
-              <div>
-                <span className="muted">Borrowed</span>
-                <span className="route-value">{formatUsd(selectedVault.borrowedUsd)}</span>
-              </div>
-              <div>
-                <span className="muted">Utilization</span>
-                <span className="route-value">{formatPercent(selectedVault.utilization * 100)}</span>
+                <span className="muted">TVL</span>
+                <span className="route-value">{formatUsd(selectedVault.tvlUsd)}</span>
               </div>
             </div>
           ) : (

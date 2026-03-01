@@ -111,8 +111,73 @@ const fetchWithRetry = async (
 };
 
 const toNumberOrZero = (value: unknown): number => {
+  if (typeof value === "string") {
+    const normalized = value.replaceAll(",", "").replaceAll("%", "").trim();
+    if (!normalized) return 0;
+    const num = Number(normalized);
+    return Number.isFinite(num) ? num : 0;
+  }
   const num = Number(value);
   return Number.isFinite(num) ? num : 0;
+};
+
+const toNumberOrNull = (value: unknown): number | null => {
+  if (value === null || value === undefined) return null;
+  const parsed = toNumberOrZero(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const normalizeMetricKey = (key: string) => key.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+const flattenMetricEntries = (
+  source: Record<string, unknown>,
+  depth = 2,
+  prefix = ""
+): Array<[string, unknown]> => {
+  const out: Array<[string, unknown]> = [];
+  for (const [key, value] of Object.entries(source)) {
+    const pathKey = prefix ? `${prefix}.${key}` : key;
+    out.push([pathKey, value]);
+    if (depth <= 0 || !value || typeof value !== "object" || Array.isArray(value)) continue;
+    out.push(
+      ...flattenMetricEntries(
+        value as Record<string, unknown>,
+        depth - 1,
+        pathKey
+      )
+    );
+  }
+  return out;
+};
+
+const pickMetricValue = (
+  sources: Array<Record<string, unknown> | null | undefined>,
+  keys: string[]
+): number | null => {
+  const normalizedKeys = keys.map(normalizeMetricKey);
+  for (const source of sources) {
+    if (!source || typeof source !== "object") continue;
+    const entries = flattenMetricEntries(source);
+    for (const wanted of normalizedKeys) {
+      const match = entries.find(([rawKey]) => {
+        const normalized = normalizeMetricKey(rawKey);
+        if (normalized === wanted) return true;
+        const parts = rawKey.split(".");
+        const leaf = parts[parts.length - 1] ?? rawKey;
+        return normalizeMetricKey(leaf) === wanted;
+      });
+      if (!match) continue;
+      const parsed = toNumberOrNull(match[1]);
+      if (parsed !== null) return parsed;
+    }
+  }
+  return null;
+};
+
+const normalizeUtilization = (value: number | null): number => {
+  if (value === null) return 0;
+  if (value > 1) return safeNumber(value / 100);
+  return safeNumber(value);
 };
 
 const normalizeApy = (value: number) => (value > 0 && value <= 1 ? value * 100 : value);
@@ -129,11 +194,83 @@ const extractSymbolFromName = (name: unknown) => {
   return parts[0] ?? safeName;
 };
 
-const slugify = (value: string) =>
+const sanitizeVaultName = (value: unknown) =>
+  (typeof value === "string" ? value : String(value ?? ""))
+    .replace(/\u0000/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const normalizeKaminoVaultName = (value: unknown) => {
+  const cleaned = sanitizeVaultName(value);
+  if (!cleaned) return "Kamino Vault";
+  return cleaned.replace(/^kamino\s+vault\s+/i, "") || cleaned;
+};
+
+const KAMINO_LEND_KNOWN_SLUGS = [
+  "sentora-pyusd",
+  "usdc-prime",
+  "cash-earn",
+  "allez-usdc",
+  "elemental-usdc-optimizer",
+  "allez-sol",
+  "rockaway-rwa-usdc",
+  "gauntlet-usdc-prime",
+  "steakhouse-usdg-high-yield",
+  "steakhouse-usd1-high-yield",
+  "steakhouse-usdc-high-yield",
+  "mev-capital-sol",
+  "gauntlet-usdc-frontier",
+  "elemental-usdg-optimizer",
+  "gauntlet-sol-balanced",
+  "usdg-prime",
+  "elemental-usds-optimizer",
+  "neutral-trade-usdc-max-yield",
+  "allez-usds",
+  "mev-capital-usdc",
+  "mev-capital-usds",
+  "elemental-sol-optimizer"
+] as const;
+
+const wordsForMatching = (value: string): string[] =>
   value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+const fallbackSlugFromName = (name: string) =>
+  name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)/g, "");
+
+const resolveKaminoLendSlug = (vaultName: string): string | null => {
+  const words = wordsForMatching(vaultName);
+  if (!words.length) return null;
+  const wordSet = new Set(words);
+
+  let best: { slug: string; score: number } | null = null;
+  for (const slug of KAMINO_LEND_KNOWN_SLUGS) {
+    const slugWords = slug.split("-");
+    const matches = slugWords.reduce((count, word) => count + (wordSet.has(word) ? 1 : 0), 0);
+    if (matches === 0) continue;
+
+    const complete = matches === slugWords.length ? 1 : 0;
+    const firstWordBonus = slugWords[0] && wordSet.has(slugWords[0]) ? 0.5 : 0;
+    const score = matches + complete + firstWordBonus;
+    if (!best || score > best.score) {
+      best = { slug, score };
+    }
+  }
+
+  if (best) return best.slug;
+
+  const fallback = fallbackSlugFromName(vaultName);
+  return KAMINO_LEND_KNOWN_SLUGS.includes(fallback as (typeof KAMINO_LEND_KNOWN_SLUGS)[number])
+    ? fallback
+    : null;
+};
 
 async function fetchSolendApiOverrides(): Promise<
   Map<string, { apyTotal: number; tvlUsd: number; liquidityUsd: number }> | null
@@ -322,40 +459,103 @@ async function buildKaminoVaults(_connection: Connection): Promise<VaultMetric[]
     const vaults = await mapWithConcurrency(list, 4, async (vault) => {
       try {
         if (!vault?.address || !vault?.state?.name) return null;
+        const vaultAny = vault as Record<string, unknown>;
         let metrics: {
           apy?: string;
           apyActual?: string;
           tokensAvailableUsd?: string;
           tokensInvestedUsd?: string;
+          availableUsd?: string;
+          investedUsd?: string;
+          liquidityUsd?: string;
+          borrowedUsd?: string;
+          utilization?: string;
         } | null = null;
         try {
-          const metricsRes = await fetchWithRetry(
-            `https://api.kamino.finance/kvaults/vaults/${vault.address}/metrics`,
-            { headers: kaminoHeaders }
-          );
-          if (metricsRes.ok) {
+          const metricsUrls = [
+            `https://api.kamino.finance/kvaults/${vault.address}/metrics`,
+            `https://api.kamino.finance/kvaults/vaults/${vault.address}/metrics`
+          ];
+          for (const metricsUrl of metricsUrls) {
+            const metricsRes = await fetchWithRetry(metricsUrl, { headers: kaminoHeaders });
+            if (!metricsRes.ok) continue;
             metrics = (await metricsRes.json()) as {
               apy?: string;
               apyActual?: string;
               tokensAvailableUsd?: string;
               tokensInvestedUsd?: string;
+              availableUsd?: string;
+              investedUsd?: string;
+              liquidityUsd?: string;
+              borrowedUsd?: string;
+              utilization?: string;
             };
+            break;
           }
         } catch {
           metrics = null;
         }
 
-        const availableUsd = toNumberOrZero(metrics?.tokensAvailableUsd);
-        const investedUsd = toNumberOrZero(metrics?.tokensInvestedUsd);
-        const tvlUsd = clampUsd(availableUsd + investedUsd);
-        const liquidityUsd = clampUsd(availableUsd);
-        const borrowedUsd = clampUsd(investedUsd);
+        const metricSources: Array<Record<string, unknown> | null | undefined> = [
+          metrics as unknown as Record<string, unknown>,
+          (vaultAny.metrics as Record<string, unknown> | undefined) ?? undefined,
+          (vaultAny.stats as Record<string, unknown> | undefined) ?? undefined,
+          (vault.state as unknown as Record<string, unknown>) ?? undefined
+        ];
+        const availableUsdRaw = pickMetricValue(metricSources, [
+          "tokensAvailableUsd",
+          "availableUsd",
+          "liquidityUsd",
+          "availableLiquidityUsd"
+        ]);
+        const investedUsdRaw = pickMetricValue(metricSources, [
+          "tokensInvestedUsd",
+          "investedUsd",
+          "investedAmountUsd"
+        ]);
+        const suppliedUsdRaw = pickMetricValue(metricSources, [
+          "totalSuppliedUsd",
+          "totalSupplyUsd",
+          "suppliedUsd",
+          "tvlUsd",
+          "aumUsd",
+          "totalAssetsUsd",
+          "totalUsdIncludingFees"
+        ]);
+        const borrowedUsdRaw = pickMetricValue(metricSources, [
+          "totalBorrowedUsd",
+          "borrowedUsd",
+          "borrowUsd"
+        ]);
+        const utilizationRaw = pickMetricValue(metricSources, [
+          "utilization",
+          "utilizationRatio",
+          "utilizationPct",
+          "util"
+        ]);
+
+        const availableUsd = clampUsd(
+          availableUsdRaw ?? toNumberOrZero(metrics?.tokensAvailableUsd ?? metrics?.availableUsd ?? metrics?.liquidityUsd)
+        );
+        const investedUsd = clampUsd(
+          investedUsdRaw ?? toNumberOrZero(metrics?.tokensInvestedUsd ?? metrics?.investedUsd ?? metrics?.borrowedUsd)
+        );
+        const suppliedUsd = clampUsd(suppliedUsdRaw ?? 0);
+        const tvlUsd = suppliedUsd > 0 ? suppliedUsd : clampUsd(availableUsd + investedUsd);
+        const utilizationFromApi = normalizeUtilization(utilizationRaw);
+        const borrowedFromApi = borrowedUsdRaw !== null ? clampUsd(borrowedUsdRaw) : 0;
+        const borrowedFromUtil =
+          utilizationFromApi > 0 && tvlUsd > 0 ? clampUsd(tvlUsd * utilizationFromApi) : 0;
+        const borrowedUsd = borrowedFromApi || borrowedFromUtil || clampUsd(investedUsd);
+        const liquidityUsd =
+          availableUsd > 0 ? clampUsd(availableUsd) : clampUsd(Math.max(0, tvlUsd - borrowedUsd));
+        const utilization = tvlUsd > 0 ? safeNumber(borrowedUsd / tvlUsd) : 0;
         const apyRaw = toNumberOrZero(metrics?.apy ?? metrics?.apyActual);
         const apyTotal = normalizeApy(apyRaw);
         const poolName = "Kamino Lend";
-        const vaultName = vault.state.name;
+        const vaultName = normalizeKaminoVaultName(vault.state.name);
         const assetSymbol = extractSymbolFromName(vaultName);
-        const slug = slugify(vaultName);
+        const kaminoSlug = resolveKaminoLendSlug(vaultName);
         return {
           id: `kamino:${vault.address}`,
           protocolId: "kamino",
@@ -367,14 +567,14 @@ async function buildKaminoVaults(_connection: Connection): Promise<VaultMetric[]
           assetMint: vault.state.tokenMint ?? "",
           assetDecimals: vault.state.tokenMintDecimals ?? 6,
           sharesMint: vault.state.sharesMint ?? undefined,
-          vaultUrl: slug ? `https://kamino.com/lend/${slug}` : "https://kamino.com/lend",
+          vaultUrl: kaminoSlug ? `https://kamino.com/lend/${kaminoSlug}` : "https://kamino.com/lend",
           apyTotal,
           apyBase: apyTotal,
           apyRewards: 0,
           tvlUsd,
           liquidityUsd,
           borrowedUsd,
-          utilization: tvlUsd > 0 ? investedUsd / tvlUsd : 0,
+          utilization,
           updatedAt: new Date().toISOString()
         } satisfies VaultMetric;
       } catch {
