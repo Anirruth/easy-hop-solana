@@ -10,10 +10,12 @@ import {
 import { Buffer } from "buffer";
 import {
   ACCOUNT_SIZE,
+  AccountLayout,
   ASSOCIATED_TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
   createAssociatedTokenAccountInstruction,
+  createCloseAccountInstruction,
   getAccountLenForMint,
   getAssociatedTokenAddress,
   getMint
@@ -82,6 +84,38 @@ const serializeTx = (
     return { base64, version: "legacy", label };
   }
   return { base64: Buffer.from(tx.serialize()).toString("base64"), version: "v0", label };
+};
+
+const deserializeBuiltTransaction = (
+  entry: BuiltTransaction
+): Transaction | VersionedTransaction => {
+  const buffer = Buffer.from(entry.base64, "base64");
+  return entry.version === "v0"
+    ? VersionedTransaction.deserialize(buffer)
+    : Transaction.from(buffer);
+};
+
+const getSignatureCount = (tx: Transaction | VersionedTransaction) => {
+  if (tx instanceof Transaction) {
+    return Math.max(1, tx.signatures?.length ?? 1);
+  }
+  const header = (tx.message as { header?: { numRequiredSignatures?: number } })
+    .header;
+  return Math.max(1, header?.numRequiredSignatures ?? 1);
+};
+
+const calculateTransactionFees = (tx: Transaction | VersionedTransaction) => {
+  const signatureFeeLamports = getSignatureCount(tx) * BASE_SIGNATURE_FEE_LAMPORTS;
+  const { computeUnitLimit, computeUnitPriceMicroLamports } = extractComputeBudget(tx);
+  const priorityFeeLamports =
+    computeUnitLimit && computeUnitPriceMicroLamports
+      ? Math.ceil((computeUnitLimit * computeUnitPriceMicroLamports) / 1_000_000)
+      : 0;
+  return {
+    signatureFeeLamports,
+    priorityFeeLamports,
+    totalLamports: signatureFeeLamports + priorityFeeLamports
+  };
 };
 
 const extractTransactions = (action: Record<string, unknown>) => {
@@ -344,17 +378,33 @@ const extractComputeBudget = (tx: Transaction | VersionedTransaction) => {
   return { computeUnitLimit, computeUnitPriceMicroLamports };
 };
 
-const buildFeeDiagnostics = (entries: BuiltTransaction[]): FeeDiagnostics => {
-  return {
-    transactions: entries.map((entry) => {
+const buildFeeDiagnostics = async (
+  connection: Connection,
+  entries: BuiltTransaction[]
+): Promise<FeeDiagnostics> => {
+  let signatureFeeLamports = 0;
+  let priorityFeeLamports = 0;
+  let networkFeeLamports = 0;
+  const transactions = await Promise.all(
+    entries.map(async (entry) => {
       try {
-        const buffer = Buffer.from(entry.base64, "base64");
-        const tx =
-          entry.version === "v0"
-            ? VersionedTransaction.deserialize(buffer)
-            : Transaction.from(buffer);
-        const { computeUnitLimit, computeUnitPriceMicroLamports } =
-          extractComputeBudget(tx);
+        const tx = deserializeBuiltTransaction(entry);
+        const { computeUnitLimit, computeUnitPriceMicroLamports } = extractComputeBudget(tx);
+        const txFees = calculateTransactionFees(tx);
+        signatureFeeLamports += txFees.signatureFeeLamports;
+        priorityFeeLamports += txFees.priorityFeeLamports;
+        let txNetworkFee = txFees.totalLamports;
+        try {
+          const message =
+            tx instanceof Transaction ? tx.compileMessage() : tx.message;
+          const feeResp = await connection.getFeeForMessage(message);
+          if (feeResp.value !== null) {
+            txNetworkFee = feeResp.value;
+          }
+        } catch {
+          // Fall back to calculated total lamports when RPC fails.
+        }
+        networkFeeLamports += txNetworkFee;
         const estimatedPriorityFeeLamports =
           computeUnitLimit && computeUnitPriceMicroLamports
             ? Math.ceil((computeUnitLimit * computeUnitPriceMicroLamports) / 1_000_000)
@@ -364,12 +414,21 @@ const buildFeeDiagnostics = (entries: BuiltTransaction[]): FeeDiagnostics => {
           version: entry.version,
           computeUnitLimit,
           computeUnitPriceMicroLamports,
-          estimatedPriorityFeeLamports
+          estimatedPriorityFeeLamports,
+          signatureFeeLamports: txFees.signatureFeeLamports,
+          networkFeeLamports: txNetworkFee
         };
       } catch {
         return { label: entry.label, version: entry.version };
       }
     })
+  );
+  return {
+    signatureFeeLamports,
+    priorityFeeLamports,
+    networkFeeLamports,
+    totalLamports: networkFeeLamports,
+    transactions
   };
 };
 
@@ -379,29 +438,10 @@ const estimateTransactionCostLamports = (entries: BuiltTransaction[]) => {
 
   entries.forEach((entry) => {
     try {
-      const buffer = Buffer.from(entry.base64, "base64");
-      const tx =
-        entry.version === "v0"
-          ? VersionedTransaction.deserialize(buffer)
-          : Transaction.from(buffer);
-
-      const signatures =
-        tx instanceof Transaction
-          ? Math.max(1, tx.signatures?.length || 1)
-          : Math.max(
-              1,
-              ((tx.message as unknown as { header?: { numRequiredSignatures?: number } })
-                .header?.numRequiredSignatures ?? 1)
-            );
-      signatureFeeLamports += signatures * BASE_SIGNATURE_FEE_LAMPORTS;
-
-      const { computeUnitLimit, computeUnitPriceMicroLamports } =
-        extractComputeBudget(tx);
-      if (computeUnitLimit && computeUnitPriceMicroLamports) {
-        priorityFeeLamports += Math.ceil(
-          (computeUnitLimit * computeUnitPriceMicroLamports) / 1_000_000
-        );
-      }
+      const tx = deserializeBuiltTransaction(entry);
+      const fees = calculateTransactionFees(tx);
+      signatureFeeLamports += fees.signatureFeeLamports;
+      priorityFeeLamports += fees.priorityFeeLamports;
     } catch {
       signatureFeeLamports += BASE_SIGNATURE_FEE_LAMPORTS;
     }
@@ -500,12 +540,18 @@ type MissingAccount = {
 };
 
 type FeeDiagnostics = {
+  signatureFeeLamports: number;
+  priorityFeeLamports: number;
+  networkFeeLamports: number;
+  totalLamports: number;
   transactions: Array<{
     label: string;
     version: "legacy" | "v0";
     computeUnitLimit?: number;
     computeUnitPriceMicroLamports?: number;
     estimatedPriorityFeeLamports?: number;
+    signatureFeeLamports?: number;
+    networkFeeLamports?: number;
   }>;
 };
 
@@ -764,6 +810,75 @@ const buildMissingAccounts = async (
   return missing;
 };
 
+const readTokenAccountAmount = (amountField: unknown): bigint => {
+  if (typeof amountField === "bigint") {
+    return amountField;
+  }
+  if (typeof amountField === "number" && Number.isFinite(amountField)) {
+    return BigInt(Math.max(0, Math.trunc(amountField)));
+  }
+  if (typeof amountField === "string" && amountField.trim()) {
+    return BigInt(amountField);
+  }
+  if (Buffer.isBuffer(amountField) || amountField instanceof Uint8Array) {
+    return Buffer.from(amountField).readBigUInt64LE(0);
+  }
+  throw new Error("Unsupported token amount format in token account data.");
+};
+
+const buildCloseTokenAccountTransactions = async (
+  connection: Connection,
+  wallet: PublicKey,
+  vault: VaultMetric
+): Promise<BuiltTransaction[]> => {
+  const targets: Array<{ label: string; mint: string }> = [];
+  if (vault.assetMint && vault.assetMint !== SOL_MINT) {
+    targets.push({ label: "asset", mint: vault.assetMint });
+  }
+  const sharesMint = vault.sharesMint ?? (await getKaminoSharesMint(vault.id));
+  if (sharesMint) {
+    targets.push({ label: "shares", mint: sharesMint });
+  }
+
+  const seen = new Set<string>();
+  const instructions: Array<{ label: string; instruction: ReturnType<typeof createCloseAccountInstruction> }> = [];
+  for (const target of targets) {
+    if (seen.has(target.mint)) continue;
+    seen.add(target.mint);
+    const mintPk = new PublicKey(target.mint);
+    const programId = await resolveTokenProgramId(connection, mintPk);
+    const ata = await getAssociatedTokenAddress(
+      mintPk,
+      wallet,
+      false,
+      programId,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
+    const ataInfo = await connection.getAccountInfo(ata);
+    if (!ataInfo) continue;
+    const accountData = AccountLayout.decode(Buffer.from(ataInfo.data));
+    const balance = readTokenAccountAmount((accountData as { amount?: unknown }).amount);
+    if (balance > 0n) {
+      throw new Error(`Cannot close ${target.label} token account while holding ${balance.toString()} tokens.`);
+    }
+    instructions.push({
+      label: `close-${target.label}`,
+      instruction: createCloseAccountInstruction(ata, wallet, wallet, [], programId)
+    });
+  }
+
+  if (!instructions.length) {
+    throw new Error("No associated token accounts found to close for this vault.");
+  }
+
+  const tx = new Transaction();
+  const { blockhash } = await connection.getLatestBlockhash("finalized");
+  tx.recentBlockhash = blockhash;
+  tx.feePayer = wallet;
+  instructions.forEach((item) => tx.add(item.instruction));
+  return [serializeTx(tx, "close-token-accounts")];
+};
+
 type SolDepositPlan = {
   transactions: BuiltTransaction[];
   swapInputLamports: number;
@@ -1015,7 +1130,9 @@ moveRouter.post("/build", async (req, res) => {
       transactions.push(serializeTx(tx, `deposit-${index + 1}`))
     );
 
-    const feeDiagnostics = payload.debugFee ? buildFeeDiagnostics(transactions) : undefined;
+    const feeDiagnostics = payload.debugFee
+      ? await buildFeeDiagnostics(connection, transactions)
+      : undefined;
     res.json({
       data: {
         transactions,
@@ -1081,7 +1198,9 @@ moveRouter.post("/deposit/build", async (req, res) => {
       transactions.push(serializeTx(tx, `deposit-${index + 1}`))
     );
 
-    const feeDiagnostics = payload.debugFee ? buildFeeDiagnostics(transactions) : undefined;
+    const feeDiagnostics = payload.debugFee
+      ? await buildFeeDiagnostics(connection, transactions)
+      : undefined;
     res.json({ data: { transactions, feeDiagnostics } });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Deposit build failed";
@@ -1156,7 +1275,9 @@ moveRouter.post("/deposit/sol/build", async (req, res) => {
       throw err;
     }
 
-    const feeDiagnostics = payload.debugFee ? buildFeeDiagnostics(plan.transactions) : undefined;
+    const feeDiagnostics = payload.debugFee
+      ? await buildFeeDiagnostics(connection, plan.transactions)
+      : undefined;
     res.json({
       data: {
         transactions: plan.transactions,
@@ -1363,10 +1484,61 @@ moveRouter.post("/withdraw/build", async (req, res) => {
       });
     }
 
-    const feeDiagnostics = payload.debugFee ? buildFeeDiagnostics(transactions) : undefined;
+    const feeDiagnostics = payload.debugFee
+      ? await buildFeeDiagnostics(connection, transactions)
+      : undefined;
     res.json({ data: { transactions, feeDiagnostics } });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Withdraw build failed";
+    res.status(500).json({ error: message });
+  }
+});
+
+moveRouter.post("/swap/build", async (req, res) => {
+  try {
+    const payload = req.body as {
+      walletAddress: string;
+      inputMint: string;
+      amountLamports: number;
+      slippagePct?: number;
+      priorityFeeMode?: unknown;
+      debugFee?: boolean;
+    };
+    if (
+      !payload?.walletAddress ||
+      typeof payload?.inputMint !== "string" ||
+      !Number.isFinite(payload?.amountLamports) ||
+      payload.amountLamports <= 0
+    ) {
+      res.status(400).json({ error: "Invalid swap request" });
+      return;
+    }
+
+    const user = new PublicKey(payload.walletAddress);
+    const connection = getPrimaryConnection();
+    const slippageBps = toSlippageBps(payload.slippagePct);
+    const priorityFeeMicroLamports = toPriorityFeeMicroLamports(payload.priorityFeeMode);
+    const swapTx = await buildJupiterSwapTx(
+      user,
+      payload.inputMint,
+      SOL_MINT,
+      payload.amountLamports,
+      slippageBps,
+      priorityFeeMicroLamports
+    );
+    const transactions = [
+      {
+        base64: swapTx.base64,
+        version: "v0",
+        label: "swap"
+      }
+    ];
+    const feeDiagnostics = payload.debugFee
+      ? await buildFeeDiagnostics(connection, transactions)
+      : undefined;
+    res.json({ data: { transactions, feeDiagnostics } });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Swap build failed";
     res.status(500).json({ error: message });
   }
 });
@@ -1472,6 +1644,41 @@ moveRouter.post("/accounts/create", async (req, res) => {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Account creation failed";
+    res.status(500).json({ error: message });
+  }
+});
+
+moveRouter.post("/accounts/close", async (req, res) => {
+  try {
+    const payload = req.body as {
+      vaultId: string;
+      walletAddress: string;
+      debugFee?: boolean;
+    };
+    if (
+      typeof payload?.vaultId !== "string" ||
+      !payload?.walletAddress
+    ) {
+      res.status(400).json({ error: "Invalid token account close request" });
+      return;
+    }
+
+    const liveVaults = await getLiveVaults({ allowStale: true });
+    const vault = liveVaults.find((item) => item.id === payload.vaultId);
+    if (!vault) {
+      res.status(404).json({ error: "Vault not found" });
+      return;
+    }
+
+    const user = new PublicKey(payload.walletAddress);
+    const connection = getPrimaryConnection();
+    const transactions = await buildCloseTokenAccountTransactions(connection, user, vault);
+    const feeDiagnostics = payload.debugFee
+      ? await buildFeeDiagnostics(connection, transactions)
+      : undefined;
+    res.json({ data: { transactions, feeDiagnostics } });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Closing token accounts failed";
     res.status(500).json({ error: message });
   }
 });

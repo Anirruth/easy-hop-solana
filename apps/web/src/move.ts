@@ -49,12 +49,17 @@ export type AccountSetupPreview = {
 };
 
 export type FeeDiagnostics = {
+  signatureFeeLamports: number;
+  priorityFeeLamports: number;
+  totalLamports: number;
   transactions: Array<{
     label: string;
     version: "legacy" | "v0";
     computeUnitLimit?: number;
     computeUnitPriceMicroLamports?: number;
     estimatedPriorityFeeLamports?: number;
+    signatureFeeLamports?: number;
+    estimatedNetworkFeeLamports?: number;
   }>;
 };
 
@@ -537,4 +542,79 @@ export const createDepositAccounts = async (
   await executeBuiltTransactions(provider, json.data.transactions);
 
   return json.data;
+};
+
+export const closeTokenAccounts = async (
+  provider: WalletProvider,
+  vault: VaultMetric,
+  debugFee?: boolean
+): Promise<FeeDiagnostics | null> => {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}/move/accounts/close`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        vaultId: vault.id,
+        walletAddress: provider.publicKey!.toBase58(),
+        debugFee
+      })
+    });
+  } catch (err) {
+    wrapNetworkError(err);
+  }
+
+  if (!response!.ok) {
+    throw new Error(await readApiError(response!, "Failed to build close-account transaction."));
+  }
+
+  const json = (await response.json()) as {
+    data: { transactions: BuiltTransaction[]; feeDiagnostics?: FeeDiagnostics };
+  };
+  if (!json.data.transactions.length) {
+    throw new Error("No close-account transaction was built.");
+  }
+  await executeBuiltTransactions(provider, json.data.transactions);
+  return json.data.feeDiagnostics ?? null;
+};
+
+export const swapAssetToSol = async (
+  provider: WalletProvider,
+  inputMint: string,
+  amountLamports: number,
+  slippagePct?: number,
+  priorityFeeMode?: "auto" | "low" | "off",
+  debugFee?: boolean,
+  onProgress?: (event: TransactionProgressEvent) => void
+): Promise<FeeDiagnostics | null> => {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}/move/swap/build`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        walletAddress: provider.publicKey!.toBase58(),
+        inputMint,
+        amountLamports,
+        slippagePct,
+        priorityFeeMode,
+        debugFee
+      })
+    });
+  } catch (err) {
+    wrapNetworkError(err);
+  }
+
+  if (!response!.ok) {
+    throw new Error(await readApiError(response!, "Failed to build swap transaction."));
+  }
+
+  const json = (await response.json()) as {
+    data: { transactions: BuiltTransaction[]; feeDiagnostics?: FeeDiagnostics };
+  };
+  if (!json.data.transactions.length) {
+    throw new Error("No swap transaction was built.");
+  }
+  await executeBuiltTransactions(provider, json.data.transactions, onProgress);
+  return json.data.feeDiagnostics ?? null;
 };

@@ -19,7 +19,9 @@ import {
   previewSolFundQuote,
   previewDepositAccounts,
   SolFundQuote,
-  withdrawFunds
+  swapAssetToSol,
+  withdrawFunds,
+  closeTokenAccounts
 } from "./move";
 
 const formatUsd = (value: number) =>
@@ -39,6 +41,9 @@ const formatSol = (value: number) =>
   `${new Intl.NumberFormat("en-US", {
     maximumFractionDigits: 6
   }).format(value)} SOL`;
+
+const toBaseUnits = (amount: number, decimals: number) =>
+  Math.round(amount * 10 ** decimals);
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 
@@ -81,6 +86,7 @@ export default function App() {
   const [withdrawTarget, setWithdrawTarget] = useState<"asset" | "sol">("asset");
   const [withdrawSlippage, setWithdrawSlippage] = useState("0.5");
   const [withdrawPriorityFee, setWithdrawPriorityFee] = useState<"auto" | "low" | "off">("off");
+  const [bundleSwap, setBundleSwap] = useState(true);
   const [wallet, setWallet] = useState<WalletProvider | null>(null);
   const [depositing, setDepositing] = useState(false);
   const [depositResult, setDepositResult] = useState<string | null>(null);
@@ -103,6 +109,9 @@ export default function App() {
   const [withdrawFlow, setWithdrawFlow] = useState<TxFlowStep[]>([]);
   const [withdrawFeeDebug, setWithdrawFeeDebug] = useState(false);
   const [withdrawFeeDetails, setWithdrawFeeDetails] = useState<FeeDiagnostics | null>(null);
+  const [manualSwapping, setManualSwapping] = useState(false);
+  const [manualSwapResult, setManualSwapResult] = useState<string | null>(null);
+  const [manualSwapFeeDetails, setManualSwapFeeDetails] = useState<FeeDiagnostics | null>(null);
   const [positions, setPositions] = useState<Record<string, VaultPosition>>({});
   const [positionsLoading, setPositionsLoading] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>("apyTotal");
@@ -125,6 +134,9 @@ export default function App() {
   const [hopPriorityFee, setHopPriorityFee] = useState<"auto" | "low" | "off">("off");
   const [hopFeeDebug, setHopFeeDebug] = useState(false);
   const [hopFeeDetails, setHopFeeDetails] = useState<FeeDiagnostics | null>(null);
+  const [closingAccounts, setClosingAccounts] = useState(false);
+  const [closeAccountsResult, setCloseAccountsResult] = useState<string | null>(null);
+  const [closeAccountsFeeDetails, setCloseAccountsFeeDetails] = useState<FeeDiagnostics | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -374,6 +386,16 @@ export default function App() {
     setSolFundQuoteError(null);
   }, [depositVaultId, depositSolAmount, depositPriorityFee, depositSlippage, depositSource]);
 
+  useEffect(() => {
+    setManualSwapResult(null);
+    setManualSwapFeeDetails(null);
+  }, [withdrawAmount, bundleSwap]);
+
+  useEffect(() => {
+    setCloseAccountsResult(null);
+    setCloseAccountsFeeDetails(null);
+  }, [activeAction]);
+
   const kaminoPositionRows = useMemo(() => {
     return vaults
       .filter((vault) => vault.protocolId === "kamino")
@@ -452,7 +474,17 @@ export default function App() {
         }
         if (typeof tx.estimatedPriorityFeeLamports === "number") {
           parts.push(
-            `~${(tx.estimatedPriorityFeeLamports / 1_000_000_000).toFixed(6)} SOL`
+            `~${(tx.estimatedPriorityFeeLamports / 1_000_000_000).toFixed(6)} SOL priority`
+          );
+        }
+        if (typeof tx.signatureFeeLamports === "number") {
+          parts.push(
+            `~${(tx.signatureFeeLamports / 1_000_000_000).toFixed(6)} SOL signatures`
+          );
+        }
+        if (typeof tx.networkFeeLamports === "number") {
+          parts.push(
+            `~${(tx.networkFeeLamports / 1_000_000_000).toFixed(6)} SOL total`
           );
         }
         return `${tx.label}: ${parts.join(", ")}`;
@@ -461,11 +493,20 @@ export default function App() {
   };
 
   const summarizeFeeDiagnostics = (details: FeeDiagnostics | null) => {
-    if (!details || !details.transactions.length) return null;
-    const totalLamports = details.transactions.reduce((acc, tx) => {
-      const fee = typeof tx.estimatedPriorityFeeLamports === "number" ? tx.estimatedPriorityFeeLamports : 0;
-      return acc + fee;
-    }, 0);
+    if (!details) return null;
+    if (details.totalLamports === undefined && !details.transactions.length) return null;
+    const totalLamports =
+      typeof details.totalLamports === "number"
+        ? details.totalLamports
+        : details.transactions.reduce((acc, tx) => {
+            const fee =
+              typeof tx.estimatedNetworkFeeLamports === "number"
+                ? tx.estimatedNetworkFeeLamports
+                : typeof tx.estimatedPriorityFeeLamports === "number"
+                  ? tx.estimatedPriorityFeeLamports
+                  : 0;
+            return acc + fee;
+          }, 0);
     if (totalLamports <= 0) return null;
     return `${(totalLamports / 1_000_000_000).toFixed(6)} SOL`;
   };
@@ -795,12 +836,17 @@ export default function App() {
     setWithdrawResult(null);
     setWithdrawFlow([]);
     setWithdrawFeeDetails(null);
+    setManualSwapResult(null);
+    setManualSwapFeeDetails(null);
     try {
+      const shouldRunManualSwap =
+        !bundleSwap && withdrawTarget === "sol" && withdrawVault.assetMint !== SOL_MINT;
+      const finalDestination = bundleSwap ? withdrawTarget : "asset";
       const diagnostics = await withdrawFunds(
         provider,
         withdrawVault,
         amount,
-        withdrawTarget,
+        finalDestination,
         slippagePct,
         withdrawPriorityFee,
         withdrawFeeDebug,
@@ -810,6 +856,16 @@ export default function App() {
       );
       if (withdrawFeeDebug) {
         setWithdrawFeeDetails(diagnostics);
+      }
+      if (shouldRunManualSwap) {
+        await runManualSwap(amount, {
+          propagateError: true,
+          onProgress: (event) => {
+            setWithdrawFlow((current) =>
+              upsertTxFlowStep(current, { ...event, label: "manual-swap" })
+            );
+          }
+        });
       }
       await loadPositions(provider.publicKey!.toBase58(), false);
       setWithdrawResult(
@@ -824,6 +880,65 @@ export default function App() {
     } finally {
       setWithdrawing(false);
     }
+  };
+
+  const runManualSwap = async (
+    amount: number,
+    options?: {
+      propagateError?: boolean;
+      onProgress?: (event: TransactionProgressEvent) => void;
+    }
+  ) => {
+    if (!withdrawVault) {
+      setManualSwapResult("Select a vault to withdraw from.");
+      return;
+    }
+    const provider = wallet ?? getWalletProvider();
+    if (!provider?.publicKey) {
+      setManualSwapResult("Connect your wallet to continue.");
+      return;
+    }
+    const slippagePct = parseSlippage(withdrawSlippage);
+    if (slippagePct === null) {
+      setManualSwapResult("Enter a valid slippage percentage (0-100).");
+      return;
+    }
+    const lamports = toBaseUnits(amount, withdrawVault.assetDecimals);
+    setManualSwapping(true);
+    setManualSwapResult(null);
+    setManualSwapFeeDetails(null);
+    try {
+      const diagnostics = await swapAssetToSol(
+        provider,
+        withdrawVault.assetMint,
+        lamports,
+        slippagePct,
+        withdrawPriorityFee,
+        withdrawFeeDebug,
+        options?.onProgress
+      );
+      if (withdrawFeeDebug) {
+        setManualSwapFeeDetails(diagnostics);
+      }
+      setManualSwapResult("Manual swap to SOL submitted.");
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error("Swap failed.");
+      setManualSwapResult(error.message);
+      if (options?.propagateError) {
+        throw error;
+      }
+    } finally {
+      setManualSwapping(false);
+    }
+  };
+
+  const handleManualSwap = async () => {
+    const amount = Number(withdrawAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setManualSwapResult("Enter a valid swap amount.");
+      return;
+    }
+    await runManualSwap(amount);
   };
 
   const handleHop = async () => {
@@ -886,6 +1001,37 @@ export default function App() {
       setHopResult(err instanceof Error ? err.message : "Failed to hop positions.");
     } finally {
       setHopping(false);
+    }
+  };
+
+  const handleCloseTokenAccounts = async (
+    vault: VaultMetric | undefined,
+    feeDebug: boolean
+  ) => {
+    if (!vault) {
+      setCloseAccountsResult("Select a vault to close token accounts.");
+      return;
+    }
+    const provider = wallet ?? getWalletProvider();
+    if (!provider?.publicKey) {
+      setCloseAccountsResult("Connect your wallet to continue.");
+      return;
+    }
+    setClosingAccounts(true);
+    setCloseAccountsResult(null);
+    setCloseAccountsFeeDetails(null);
+    try {
+      const diagnostics = await closeTokenAccounts(provider, vault, feeDebug);
+      if (feeDebug && diagnostics) {
+        setCloseAccountsFeeDetails(diagnostics);
+      }
+      setCloseAccountsResult("Token accounts closed and rent reclaimed.");
+    } catch (err) {
+      setCloseAccountsResult(
+        err instanceof Error ? err.message : "Failed to close token accounts."
+      );
+    } finally {
+      setClosingAccounts(false);
     }
   };
 
@@ -1551,6 +1697,22 @@ export default function App() {
                     <option value="on">On</option>
                   </select>
                 </label>
+                <label>
+                  Swap handling
+                  <select
+                    value={bundleSwap ? "bundle" : "manual"}
+                    onChange={(event) => {
+                      const mode = event.target.value === "bundle";
+                      setBundleSwap(mode);
+                      if (withdrawTarget !== "sol") {
+                        setWithdrawTarget("sol");
+                      }
+                    }}
+                  >
+                    <option value="bundle">Bundle withdraw + swap</option>
+                    <option value="manual">Manual swap step</option>
+                  </select>
+                </label>
               </div>
               {withdrawVault && (
                 <div className="position-summary">
@@ -1574,6 +1736,40 @@ export default function App() {
                   <span className="inline-badge">Includes Jupiter swap</span>
                 )}
               </div>
+              <div className="action-tools">
+                {!bundleSwap && (
+                  <button
+                    className="ghost"
+                    onClick={handleManualSwap}
+                    disabled={
+                      manualSwapping ||
+                      !withdrawVault ||
+                      !Number(withdrawAmount)
+                    }
+                  >
+                    {manualSwapping ? "Swapping..." : "Swap to SOL"}
+                  </button>
+                )}
+                <button
+                  className="ghost"
+                  onClick={() => handleCloseTokenAccounts(withdrawVault, withdrawFeeDebug)}
+                  disabled={closingAccounts || !withdrawVault}
+                >
+                  {closingAccounts ? "Closing accounts..." : "Close token accounts"}
+                </button>
+              </div>
+              {manualSwapResult && <p className="result">{manualSwapResult}</p>}
+              {manualSwapFeeDetails && (
+                <p className="result" style={{ whiteSpace: "pre-line" }}>
+                  {formatFeeDiagnostics(manualSwapFeeDetails)}
+                </p>
+              )}
+              {closeAccountsResult && <p className="result">{closeAccountsResult}</p>}
+              {closeAccountsFeeDetails && (
+                <p className="result" style={{ whiteSpace: "pre-line" }}>
+                  {formatFeeDiagnostics(closeAccountsFeeDetails)}
+                </p>
+              )}
               {withdrawFlow.length > 0 && (
                 <div className="flow-progress">
                   <div className="flow-steps">
@@ -1690,6 +1886,21 @@ export default function App() {
                   <span className="inline-badge">Includes Jupiter swap</span>
                 )}
               </div>
+              <div className="action-tools">
+                <button
+                  className="ghost"
+                  onClick={() => handleCloseTokenAccounts(hopFromVault, hopFeeDebug)}
+                  disabled={closingAccounts || !hopFromVault}
+                >
+                  {closingAccounts ? "Closing accounts..." : "Close token accounts"}
+                </button>
+              </div>
+              {closeAccountsResult && <p className="result">{closeAccountsResult}</p>}
+              {closeAccountsFeeDetails && (
+                <p className="result" style={{ whiteSpace: "pre-line" }}>
+                  {formatFeeDiagnostics(closeAccountsFeeDetails)}
+                </p>
+              )}
               {hopFlow.length > 0 && (
                 <div className="flow-progress">
                   <div className="flow-steps">
