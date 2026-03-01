@@ -1,20 +1,10 @@
 import { Router } from "express";
 import { PublicKey } from "@solana/web3.js";
 import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
-import {
-  fetchObligationsOfPoolByWallet,
-  fetchPoolMetadata,
-  fetchPools,
-  formatObligation,
-  getProgramId,
-  MAIN_POOL_ADDRESS
-} from "@solendprotocol/solend-sdk";
-import SwitchboardProgram from "@switchboard-xyz/sbv2-lite";
 import { KaminoManager, KaminoVault } from "@kamino-finance/klend-sdk";
 import { Farms, lamportsToCollDecimal, scaleDownWads } from "@kamino-finance/farms-sdk";
 import { VaultPosition } from "../types.js";
 import { getLiveVaults } from "../services/vaults.js";
-import { loadSwitchboardProgram } from "../services/solend.js";
 import { getKaminoRpc, toKaminoAddress } from "../services/kamino.js";
 
 export const positionsRouter = Router();
@@ -72,103 +62,12 @@ positionsRouter.get("/", async (req, res) => {
     const positionsByVault = new Map<string, VaultPosition>();
 
     const vaults = await getLiveVaults({ allowStale: true });
-    const solendVaults = vaults.filter((vault) => vault.protocolId === "solend");
-    if (solendVaults.length) {
-      try {
-        const programId = getProgramId("production");
-        const [poolMetadataRaw, slot, switchboardProgramRaw] = await Promise.all([
-          fetchPoolMetadata(connection, "production"),
-          connection.getSlot("confirmed"),
-          loadSwitchboardProgram(connection)
-        ]);
-        const switchboardProgram = switchboardProgramRaw as SwitchboardProgram;
-        const rawList = Array.isArray(poolMetadataRaw) ? poolMetadataRaw : [];
-        const poolMetadata = rawList.filter(
-          (p: { address?: string }) => p && typeof p.address === "string"
-        ) as unknown as Parameters<typeof fetchPools>[0];
-        if (poolMetadata.length === 0) throw new Error("No pool metadata");
-        const pools = await fetchPools(
-          poolMetadata,
-          connection,
-          switchboardProgram,
-          programId.toBase58(),
-          slot,
-          true
-        );
-        const solendVaultGroups = new Map<string, typeof solendVaults>();
-        solendVaults.forEach((vault) => {
-          const raw =
-            typeof vault.id === "string" ? vault.id : String(vault.id ?? "");
-          const parts = raw.split(":");
-          if (parts[0] !== "solend" || !parts[1]) return;
-          const poolAddress = parts[1];
-          const current = solendVaultGroups.get(poolAddress) ?? [];
-          current.push(vault);
-          solendVaultGroups.set(poolAddress, current);
-        });
-
-        for (const [poolAddress, vaultGroup] of solendVaultGroups.entries()) {
-          const pool =
-            pools[poolAddress] ??
-            pools[MAIN_POOL_ADDRESS.toBase58()] ??
-            pools[poolMetadata[0]?.address ?? ""];
-          if (!pool) {
-            vaultGroup.forEach((vault) =>
-              positionsByVault.set(vault.id, {
-                vaultId: vault.id,
-                depositedAmount: 0,
-                availableAmount: 0
-              })
-            );
-            continue;
-          }
-
-          const reserveMap = pool.reserves.reduce<Record<string, (typeof pool.reserves)[number]>>(
-            (acc, reserve) => {
-              acc[reserve.address] = reserve;
-              return acc;
-            },
-            {}
-          );
-
-          const obligations = await fetchObligationsOfPoolByWallet(
-            user,
-            new PublicKey(pool.address),
-            programId,
-            connection
-          );
-
-          const totalsByMint = new Map<string, number>();
-          obligations
-            .map((obligation) => formatObligation(obligation, reserveMap))
-            .forEach((formatted) => {
-              formatted.deposits.forEach((deposit) => {
-                const current = totalsByMint.get(deposit.mintAddress) ?? 0;
-                totalsByMint.set(deposit.mintAddress, current + deposit.amount.toNumber());
-              });
-            });
-
-          vaultGroup.forEach((vault) => {
-            const amount = toSafeNumber(totalsByMint.get(vault.assetMint) ?? 0);
-            positionsByVault.set(vault.id, {
-              vaultId: vault.id,
-              depositedAmount: amount,
-              availableAmount: amount
-            });
-          });
-        }
-      } catch (_err) {
-        solendVaults.forEach((vault) => {
-          positionsByVault.set(vault.id, { vaultId: vault.id, depositedAmount: 0, availableAmount: 0 });
-        });
-      }
-    }
-
     const kaminoVaults = vaults.filter((vault) => vault.protocolId === "kamino");
     if (kaminoVaults.length) {
       const rpc = kaminoRpc();
       const manager = new KaminoManager(rpc);
       const farms = new Farms(rpc);
+      const userKaminoAddress = toKaminoAddress(user.toBase58());
       const kvaultAddresses = kaminoVaults
         .map((vault) => {
           const idValue =
@@ -192,7 +91,7 @@ positionsRouter.get("/", async (req, res) => {
 
       let userFarmStates = new Map<string, { activeStakeScaled: unknown }>();
       try {
-        const farmStates = await farms.getAllUserStatesForUser(toKaminoAddress(user.toBase58()));
+        const farmStates = await farms.getAllUserStatesForUser(userKaminoAddress);
         farmStates.forEach((entry) => {
           userFarmStates.set(entry.userState.farmState.toString(), entry.userState);
         });
@@ -200,7 +99,7 @@ positionsRouter.get("/", async (req, res) => {
         userFarmStates = new Map();
       }
 
-      for (const vault of kaminoVaults) {
+      await Promise.all(kaminoVaults.map(async (vault) => {
         const idValue =
           typeof vault.id === "string" ? vault.id : String(vault.id ?? "");
         const kvaultAddress = idValue.split(":")[1];
@@ -210,7 +109,7 @@ positionsRouter.get("/", async (req, res) => {
             depositedAmount: 0,
             availableAmount: 0
           });
-          continue;
+          return;
         }
 
         try {
@@ -225,32 +124,33 @@ positionsRouter.get("/", async (req, res) => {
               depositedAmount: 0,
               availableAmount: 0
             });
-            continue;
+            return;
           }
+          const state = kvault.state;
 
-          const sharesMint = kvault.state.sharesMint
-            ? String(kvault.state.sharesMint)
+          const sharesMint = state.sharesMint
+            ? String(state.sharesMint)
             : "";
           const walletShares =
             (sharesMint ? tokenBalances.get(sharesMint) ?? 0 : 0) +
             (sharesMint ? token2022Balances.get(sharesMint) ?? 0 : 0);
-          const farmAddress = kvault.state.vaultFarm
-            ? String(kvault.state.vaultFarm)
+          const farmAddress = state.vaultFarm
+            ? String(state.vaultFarm)
             : "";
           let farmShares = 0;
           if (farmAddress && farmAddress !== "11111111111111111111111111111111") {
             const userState = userFarmStates.get(farmAddress);
             if (userState && (userState as { activeStakeScaled?: unknown }).activeStakeScaled) {
-              const decimals = Number(kvault.state.sharesMintDecimals.toString());
+              const decimals = Number(state.sharesMintDecimals.toString());
               const activeStake = (userState as { activeStakeScaled: unknown }).activeStakeScaled as any;
               const scaled = scaleDownWads(activeStake);
               const tokens = lamportsToCollDecimal(scaled, decimals);
               farmShares = Number(tokens.toString());
             } else {
               try {
-                const decimals = Number(kvault.state.sharesMintDecimals.toString());
+                const decimals = Number(state.sharesMintDecimals.toString());
                 const farmTokens = await farms.getUserTokensInUndelegatedFarm(
-                  toKaminoAddress(user.toBase58()),
+                  userKaminoAddress,
                   toKaminoAddress(farmAddress),
                   decimals
                 );
@@ -268,7 +168,7 @@ positionsRouter.get("/", async (req, res) => {
               depositedAmount: 0,
               availableAmount: 0
             });
-            continue;
+            return;
           }
 
           let amount = 0;
@@ -290,7 +190,7 @@ positionsRouter.get("/", async (req, res) => {
             availableAmount: 0
           });
         }
-      }
+      }));
     }
 
     const positions = vaults.map((vault) => {

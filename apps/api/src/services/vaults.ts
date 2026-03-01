@@ -1,56 +1,26 @@
-import { Connection } from "@solana/web3.js";
-import {
-  fetchPoolMetadata,
-  fetchPools,
-  getProgramId,
-  MAIN_POOL_ADDRESS
-} from "@solendprotocol/solend-sdk";
 import { VaultMetric } from "../types.js";
-import { loadSwitchboardProgram } from "./solend.js";
 
-import { getFallbackConnection, getPrimaryConnection } from "./rpc.js";
 const VAULT_CACHE_TTL_MS = 180_000;
 const EMPTY_CACHE_TTL_MS = 10_000;
-const SOLEND_API_TIMEOUT_MS = 5000;
-const SOLEND_MARKETS_TTL_MS = 10 * 60_000;
 const KAMINO_API_TIMEOUT_MS = 7000;
 const KAMINO_API_RETRIES = 1;
+const KAMINO_FETCH_PER_VAULT_METRICS =
+  process.env.KAMINO_FETCH_PER_VAULT_METRICS === "true";
+const KAMINO_FORCE_BULK_ONLY =
+  process.env.KAMINO_FORCE_BULK_ONLY === "true";
+const KAMINO_VAULT_BUILD_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.KAMINO_VAULT_BUILD_CONCURRENCY ?? 10)
+);
 let vaultCache: { data: VaultMetric[]; expires: number } | null = null;
-let solendMarketCache: { data: Map<string, string>; expires: number } | null = null;
 let vaultRefreshPromise: Promise<VaultMetric[]> | null = null;
 
 const safeNumber = (value: number) => (Number.isFinite(value) ? value : 0);
-
-const toNumberSafe = (value: unknown): number => {
-  if (typeof value === "number") return safeNumber(value);
-  if (typeof value === "bigint") return safeNumber(Number(value));
-  if (value && typeof (value as { toNumber?: () => number }).toNumber === "function") {
-    return safeNumber((value as { toNumber: () => number }).toNumber());
-  }
-  return safeNumber(Number(value));
-};
 
 const clampUsd = (value: number, max = 1e15): number => {
   if (!Number.isFinite(value) || value < 0) return 0;
   return Math.min(value, max);
 };
-
-const normalizeString = (value: unknown): string =>
-  typeof value === "string" ? value : (value as { toString?: () => string })?.toString?.() ?? "";
-
-const isLikelyAddress = (value: string) =>
-  /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value);
-
-const pickDisplayName = (candidates: Array<string | undefined>, fallback: string) => {
-  for (const candidate of candidates) {
-    if (!candidate) continue;
-    if (!isLikelyAddress(candidate)) return candidate;
-  }
-  return fallback;
-};
-
-const solendPoolParam = (poolAddress: string): string =>
-  poolAddress === MAIN_POOL_ADDRESS.toBase58() ? "main" : poolAddress;
 
 const kaminoHeaders = {
   Accept: "application/json",
@@ -131,7 +101,7 @@ const normalizeMetricKey = (key: string) => key.toLowerCase().replace(/[^a-z0-9]
 
 const flattenMetricEntries = (
   source: Record<string, unknown>,
-  depth = 2,
+  depth = 4,
   prefix = ""
 ): Array<[string, unknown]> => {
   const out: Array<[string, unknown]> = [];
@@ -272,174 +242,7 @@ const resolveKaminoLendSlug = (vaultName: string): string | null => {
     : null;
 };
 
-async function fetchSolendApiOverrides(): Promise<
-  Map<string, { apyTotal: number; tvlUsd: number; liquidityUsd: number }> | null
-> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), SOLEND_API_TIMEOUT_MS);
-  try {
-    const res = await fetch("https://api.solend.fi/v1/reserves", {
-      signal: controller.signal,
-      headers: { Accept: "application/json" }
-    });
-    clearTimeout(timeout);
-    if (!res.ok) return null;
-    const data = (await res.json()) as unknown;
-    const list = Array.isArray(data) ? data : (data as { reserves?: unknown[] })?.reserves;
-    if (!Array.isArray(list)) return null;
-    const byMint = new Map<string, { apyTotal: number; tvlUsd: number; liquidityUsd: number }>();
-    for (const r of list) {
-      const mint =
-        (r as { liquidity?: { mint?: string }; mint?: string })?.liquidity?.mint ??
-        (r as { mint?: string })?.mint;
-      if (!mint) continue;
-      const apy = safeNumber(
-        (r as { supplyInterestRate?: number; supply_apy?: number })?.supplyInterestRate ??
-          (r as { supply_apy?: number })?.supply_apy
-      );
-      const apyPct = apy <= 1 && apy > 0 ? apy * 100 : apy;
-      const totalUsd = clampUsd(
-        safeNumber(
-          (r as { totalDepositsUsd?: number })?.totalDepositsUsd ??
-            (r as { total_deposits_usd?: number })?.total_deposits_usd ??
-            0
-        )
-      );
-      const availUsd = clampUsd(
-        safeNumber(
-          (r as { availableAmountUsd?: number })?.availableAmountUsd ??
-            (r as { available_liquidity_usd?: number })?.available_liquidity_usd ??
-            0
-        )
-      );
-      byMint.set(mint, {
-        apyTotal: apyPct,
-        tvlUsd: totalUsd,
-        liquidityUsd: Math.min(availUsd, totalUsd)
-      });
-    }
-    return byMint.size > 0 ? byMint : null;
-  } catch {
-    clearTimeout(timeout);
-    return null;
-  }
-}
-
-async function fetchSolendMarketNames(): Promise<Map<string, string> | null> {
-  const now = Date.now();
-  if (solendMarketCache && solendMarketCache.expires > now) {
-    return solendMarketCache.data;
-  }
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), SOLEND_API_TIMEOUT_MS);
-  try {
-    const res = await fetch("https://api.solend.fi/v1/markets?scope=all", {
-      signal: controller.signal,
-      headers: { Accept: "application/json" }
-    });
-    clearTimeout(timeout);
-    if (!res.ok) return null;
-    const data = (await res.json()) as { results?: Array<{ address?: string; name?: string }> };
-    if (!Array.isArray(data?.results)) return null;
-    const map = new Map<string, string>();
-    data.results.forEach((market) => {
-      if (!market?.address || !market?.name) return;
-      map.set(market.address, market.name);
-    });
-    solendMarketCache = { data: map, expires: now + SOLEND_MARKETS_TTL_MS };
-    return map;
-  } catch {
-    clearTimeout(timeout);
-    return null;
-  }
-}
-
-async function buildSolendVaults(
-  connection: Connection,
-  overrides: Map<string, { apyTotal: number; tvlUsd: number; liquidityUsd: number }> | null
-): Promise<VaultMetric[]> {
-  try {
-    const programId = getProgramId("production");
-    const [poolMetadataRaw, slot, switchboardProgram, solendMarkets] = await Promise.all([
-      fetchPoolMetadata(connection, "production"),
-      connection.getSlot("confirmed"),
-      loadSwitchboardProgram(connection),
-      fetchSolendMarketNames()
-    ]);
-
-    const rawList = Array.isArray(poolMetadataRaw) ? poolMetadataRaw : [];
-    const poolMetadata = rawList.filter(
-      (p: { address?: string }) => p && typeof p.address === "string"
-    ) as unknown as Parameters<typeof fetchPools>[0];
-    if (poolMetadata.length === 0) return [];
-
-    const pools = await fetchPools(
-      poolMetadata,
-      connection,
-      switchboardProgram,
-      programId.toBase58(),
-      slot,
-      true
-    );
-
-    const vaults: VaultMetric[] = [];
-    Object.values(pools).forEach((pool) => {
-      if (!pool || !Array.isArray(pool.reserves)) return;
-      const marketName = solendMarkets?.get(pool.address);
-      const poolName = pickDisplayName([marketName, pool.name], "Solend Pool");
-      const poolAddress = pool.address;
-      const poolParam = solendPoolParam(poolAddress);
-      pool.reserves.forEach((reserve) => {
-        if (!reserve?.mintAddress || !reserve.address) return;
-        const tvlUsd = clampUsd(safeNumber(reserve.totalSupplyUsd.toNumber()));
-        const availUsd = clampUsd(safeNumber(reserve.availableAmountUsd.toNumber()));
-        const liquidityUsd = Math.min(availUsd, tvlUsd);
-        const reserveAddr = reserve.address;
-        const solendVaultUrl = reserveAddr
-          ? `https://save.finance/?pool=${poolParam}&reserve=${reserveAddr}`
-          : `https://save.finance/?pool=${poolParam}`;
-        const apiOverride =
-          poolAddress === MAIN_POOL_ADDRESS.toBase58()
-            ? overrides?.get(reserve.mintAddress)
-            : undefined;
-        const effectiveTvlUsd = apiOverride?.tvlUsd ?? tvlUsd;
-        const effectiveLiquidityUsd = apiOverride?.liquidityUsd ?? liquidityUsd;
-        const borrowedUsd = clampUsd(effectiveTvlUsd - effectiveLiquidityUsd);
-        const tokenName = pickDisplayName(
-          [reserve.symbol, reserve.name],
-          "Token"
-        );
-        vaults.push({
-          id: `solend:${poolAddress}:${reserveAddr}`,
-          protocolId: "solend",
-          protocolName: "Solend",
-          poolName,
-          vaultName: tokenName,
-          category: "lending",
-          assetSymbol: tokenName,
-          assetMint: reserve.mintAddress,
-          assetDecimals: reserve.decimals,
-          vaultUrl: solendVaultUrl,
-          apyTotal: apiOverride?.apyTotal ?? safeNumber(reserve.supplyInterest.toNumber() * 100),
-          apyBase: safeNumber(reserve.supplyInterest.toNumber() * 100),
-          apyRewards: 0,
-          tvlUsd: effectiveTvlUsd,
-          liquidityUsd: effectiveLiquidityUsd,
-          borrowedUsd,
-          utilization: safeNumber(reserve.reserveUtilization.toNumber()),
-          updatedAt: new Date().toISOString()
-        });
-      });
-    });
-
-    return vaults;
-  } catch (err) {
-    console.warn("Solend vault fetch failed:", err instanceof Error ? err.message : err);
-    return [];
-  }
-}
-
-async function buildKaminoVaults(_connection: Connection): Promise<VaultMetric[]> {
+async function buildKaminoVaults(): Promise<VaultMetric[]> {
   try {
     const res = await fetchWithRetry("https://api.kamino.finance/kvaults/vaults", {
       headers: kaminoHeaders
@@ -456,131 +259,154 @@ async function buildKaminoVaults(_connection: Connection): Promise<VaultMetric[]
     }>;
     if (!Array.isArray(list)) return [];
 
-    const vaults = await mapWithConcurrency(list, 4, async (vault) => {
-      try {
-        if (!vault?.address || !vault?.state?.name) return null;
-        const vaultAny = vault as Record<string, unknown>;
-        let metrics: {
-          apy?: string;
-          apyActual?: string;
-          tokensAvailableUsd?: string;
-          tokensInvestedUsd?: string;
-          availableUsd?: string;
-          investedUsd?: string;
-          liquidityUsd?: string;
-          borrowedUsd?: string;
-          utilization?: string;
-        } | null = null;
+    const loadKaminoVaultRows = async (fetchPerVaultMetrics: boolean) => {
+      const vaultBuildConcurrency = fetchPerVaultMetrics
+        ? KAMINO_VAULT_BUILD_CONCURRENCY
+        : 24;
+      return mapWithConcurrency(list, vaultBuildConcurrency, async (vault) => {
         try {
-          const metricsUrls = [
-            `https://api.kamino.finance/kvaults/${vault.address}/metrics`,
-            `https://api.kamino.finance/kvaults/vaults/${vault.address}/metrics`
-          ];
-          for (const metricsUrl of metricsUrls) {
-            const metricsRes = await fetchWithRetry(metricsUrl, { headers: kaminoHeaders });
-            if (!metricsRes.ok) continue;
-            metrics = (await metricsRes.json()) as {
-              apy?: string;
-              apyActual?: string;
-              tokensAvailableUsd?: string;
-              tokensInvestedUsd?: string;
-              availableUsd?: string;
-              investedUsd?: string;
-              liquidityUsd?: string;
-              borrowedUsd?: string;
-              utilization?: string;
-            };
-            break;
+          if (!vault?.address || !vault?.state?.name) return null;
+          const vaultAny = vault as Record<string, unknown>;
+          let metrics: {
+            apy?: string;
+            apyActual?: string;
+            tokensAvailableUsd?: string;
+            tokensInvestedUsd?: string;
+            availableUsd?: string;
+            investedUsd?: string;
+            liquidityUsd?: string;
+            borrowedUsd?: string;
+            utilization?: string;
+          } | null = null;
+          if (fetchPerVaultMetrics) {
+            try {
+              const metricsUrls = [
+                `https://api.kamino.finance/kvaults/${vault.address}/metrics`,
+                `https://api.kamino.finance/kvaults/vaults/${vault.address}/metrics`
+              ];
+              for (const metricsUrl of metricsUrls) {
+                const metricsRes = await fetchWithRetry(metricsUrl, { headers: kaminoHeaders });
+                if (!metricsRes.ok) continue;
+                metrics = (await metricsRes.json()) as {
+                  apy?: string;
+                  apyActual?: string;
+                  tokensAvailableUsd?: string;
+                  tokensInvestedUsd?: string;
+                  availableUsd?: string;
+                  investedUsd?: string;
+                  liquidityUsd?: string;
+                  borrowedUsd?: string;
+                  utilization?: string;
+                };
+                break;
+              }
+            } catch {
+              metrics = null;
+            }
           }
+
+          const metricSources: Array<Record<string, unknown> | null | undefined> = [
+            metrics as unknown as Record<string, unknown>,
+            (vaultAny.metrics as Record<string, unknown> | undefined) ?? undefined,
+            (vaultAny.stats as Record<string, unknown> | undefined) ?? undefined,
+            (vault.state as unknown as Record<string, unknown>) ?? undefined
+          ];
+          const availableUsdRaw = pickMetricValue(metricSources, [
+            "tokensAvailableUsd",
+            "availableUsd",
+            "liquidityUsd",
+            "availableLiquidityUsd"
+          ]);
+          const investedUsdRaw = pickMetricValue(metricSources, [
+            "tokensInvestedUsd",
+            "investedUsd",
+            "investedAmountUsd"
+          ]);
+          const suppliedUsdRaw = pickMetricValue(metricSources, [
+            "totalSuppliedUsd",
+            "totalSupplyUsd",
+            "suppliedUsd",
+            "tvlUsd",
+            "aumUsd",
+            "totalAssetsUsd",
+            "totalUsdIncludingFees"
+          ]);
+          const borrowedUsdRaw = pickMetricValue(metricSources, [
+            "totalBorrowedUsd",
+            "borrowedUsd",
+            "borrowUsd"
+          ]);
+          const utilizationRaw = pickMetricValue(metricSources, [
+            "utilization",
+            "utilizationRatio",
+            "utilizationPct",
+            "util"
+          ]);
+
+          const availableUsd = clampUsd(
+            availableUsdRaw ?? toNumberOrZero(metrics?.tokensAvailableUsd ?? metrics?.availableUsd ?? metrics?.liquidityUsd)
+          );
+          const investedUsd = clampUsd(
+            investedUsdRaw ?? toNumberOrZero(metrics?.tokensInvestedUsd ?? metrics?.investedUsd ?? metrics?.borrowedUsd)
+          );
+          const suppliedUsd = clampUsd(suppliedUsdRaw ?? 0);
+          const tvlUsd = suppliedUsd > 0 ? suppliedUsd : clampUsd(availableUsd + investedUsd);
+          const utilizationFromApi = normalizeUtilization(utilizationRaw);
+          const borrowedFromApi = borrowedUsdRaw !== null ? clampUsd(borrowedUsdRaw) : 0;
+          const borrowedFromUtil =
+            utilizationFromApi > 0 && tvlUsd > 0 ? clampUsd(tvlUsd * utilizationFromApi) : 0;
+          const borrowedUsd = borrowedFromApi || borrowedFromUtil || clampUsd(investedUsd);
+          const liquidityUsd =
+            availableUsd > 0 ? clampUsd(availableUsd) : clampUsd(Math.max(0, tvlUsd - borrowedUsd));
+          const utilization = tvlUsd > 0 ? safeNumber(borrowedUsd / tvlUsd) : 0;
+          const apyRaw = toNumberOrZero(metrics?.apy ?? metrics?.apyActual);
+          const apyTotal = normalizeApy(apyRaw);
+          const poolName = "Kamino Lend";
+          const vaultName = normalizeKaminoVaultName(vault.state.name);
+          const assetSymbol = extractSymbolFromName(vaultName);
+          const kaminoSlug = resolveKaminoLendSlug(vaultName);
+          return {
+            id: `kamino:${vault.address}`,
+            protocolId: "kamino",
+            protocolName: "Kamino Lend",
+            poolName,
+            vaultName,
+            category: "lending",
+            assetSymbol,
+            assetMint: vault.state.tokenMint ?? "",
+            assetDecimals: vault.state.tokenMintDecimals ?? 6,
+            sharesMint: vault.state.sharesMint ?? undefined,
+            vaultUrl: kaminoSlug ? `https://kamino.com/lend/${kaminoSlug}` : "https://kamino.com/lend",
+            apyTotal,
+            apyBase: apyTotal,
+            apyRewards: 0,
+            tvlUsd,
+            liquidityUsd,
+            borrowedUsd,
+            utilization,
+            updatedAt: new Date().toISOString()
+          } satisfies VaultMetric;
         } catch {
-          metrics = null;
+          return null;
         }
+      });
+    };
 
-        const metricSources: Array<Record<string, unknown> | null | undefined> = [
-          metrics as unknown as Record<string, unknown>,
-          (vaultAny.metrics as Record<string, unknown> | undefined) ?? undefined,
-          (vaultAny.stats as Record<string, unknown> | undefined) ?? undefined,
-          (vault.state as unknown as Record<string, unknown>) ?? undefined
-        ];
-        const availableUsdRaw = pickMetricValue(metricSources, [
-          "tokensAvailableUsd",
-          "availableUsd",
-          "liquidityUsd",
-          "availableLiquidityUsd"
-        ]);
-        const investedUsdRaw = pickMetricValue(metricSources, [
-          "tokensInvestedUsd",
-          "investedUsd",
-          "investedAmountUsd"
-        ]);
-        const suppliedUsdRaw = pickMetricValue(metricSources, [
-          "totalSuppliedUsd",
-          "totalSupplyUsd",
-          "suppliedUsd",
-          "tvlUsd",
-          "aumUsd",
-          "totalAssetsUsd",
-          "totalUsdIncludingFees"
-        ]);
-        const borrowedUsdRaw = pickMetricValue(metricSources, [
-          "totalBorrowedUsd",
-          "borrowedUsd",
-          "borrowUsd"
-        ]);
-        const utilizationRaw = pickMetricValue(metricSources, [
-          "utilization",
-          "utilizationRatio",
-          "utilizationPct",
-          "util"
-        ]);
-
-        const availableUsd = clampUsd(
-          availableUsdRaw ?? toNumberOrZero(metrics?.tokensAvailableUsd ?? metrics?.availableUsd ?? metrics?.liquidityUsd)
+    let vaults = await loadKaminoVaultRows(KAMINO_FETCH_PER_VAULT_METRICS);
+    if (!KAMINO_FETCH_PER_VAULT_METRICS && !KAMINO_FORCE_BULK_ONLY) {
+      const total = vaults.length;
+      const nonZeroTvl = vaults.filter((vault) => vault.tvlUsd > 0).length;
+      const uiEligibleTvl = vaults.filter((vault) => vault.tvlUsd >= 100_000).length;
+      const hasReasonableTvlCoverage =
+        total > 0 && (
+          uiEligibleTvl >= 5 ||
+          uiEligibleTvl / total >= 0.1 ||
+          nonZeroTvl / total >= 0.25
         );
-        const investedUsd = clampUsd(
-          investedUsdRaw ?? toNumberOrZero(metrics?.tokensInvestedUsd ?? metrics?.investedUsd ?? metrics?.borrowedUsd)
-        );
-        const suppliedUsd = clampUsd(suppliedUsdRaw ?? 0);
-        const tvlUsd = suppliedUsd > 0 ? suppliedUsd : clampUsd(availableUsd + investedUsd);
-        const utilizationFromApi = normalizeUtilization(utilizationRaw);
-        const borrowedFromApi = borrowedUsdRaw !== null ? clampUsd(borrowedUsdRaw) : 0;
-        const borrowedFromUtil =
-          utilizationFromApi > 0 && tvlUsd > 0 ? clampUsd(tvlUsd * utilizationFromApi) : 0;
-        const borrowedUsd = borrowedFromApi || borrowedFromUtil || clampUsd(investedUsd);
-        const liquidityUsd =
-          availableUsd > 0 ? clampUsd(availableUsd) : clampUsd(Math.max(0, tvlUsd - borrowedUsd));
-        const utilization = tvlUsd > 0 ? safeNumber(borrowedUsd / tvlUsd) : 0;
-        const apyRaw = toNumberOrZero(metrics?.apy ?? metrics?.apyActual);
-        const apyTotal = normalizeApy(apyRaw);
-        const poolName = "Kamino Lend";
-        const vaultName = normalizeKaminoVaultName(vault.state.name);
-        const assetSymbol = extractSymbolFromName(vaultName);
-        const kaminoSlug = resolveKaminoLendSlug(vaultName);
-        return {
-          id: `kamino:${vault.address}`,
-          protocolId: "kamino",
-          protocolName: "Kamino Lend",
-          poolName,
-          vaultName,
-          category: "lending",
-          assetSymbol,
-          assetMint: vault.state.tokenMint ?? "",
-          assetDecimals: vault.state.tokenMintDecimals ?? 6,
-          sharesMint: vault.state.sharesMint ?? undefined,
-          vaultUrl: kaminoSlug ? `https://kamino.com/lend/${kaminoSlug}` : "https://kamino.com/lend",
-          apyTotal,
-          apyBase: apyTotal,
-          apyRewards: 0,
-          tvlUsd,
-          liquidityUsd,
-          borrowedUsd,
-          utilization,
-          updatedAt: new Date().toISOString()
-        } satisfies VaultMetric;
-      } catch {
-        return null;
+      if (!hasReasonableTvlCoverage) {
+        vaults = await loadKaminoVaultRows(true);
       }
-    });
+    }
 
     return vaults;
   } catch (err) {
@@ -596,17 +422,7 @@ const refreshVaults = async (): Promise<VaultMetric[]> => {
   if (vaultRefreshPromise) return vaultRefreshPromise;
   vaultRefreshPromise = (async () => {
     const now = Date.now();
-    const connection = getPrimaryConnection();
-    const fallbackConnection = getFallbackConnection();
-    let kamino = await buildKaminoVaults(connection);
-
-    if (fallbackConnection) {
-      if (!kamino.length) {
-        kamino = await buildKaminoVaults(fallbackConnection);
-      }
-    }
-
-    const data = kamino;
+    const data = await buildKaminoVaults();
     const ttl = data.length ? VAULT_CACHE_TTL_MS : EMPTY_CACHE_TTL_MS;
     vaultCache = { data, expires: now + ttl };
     return data;

@@ -73,11 +73,23 @@ const PROTOCOL_LABELS: Record<string, string> = {
 type SortKey = "apyTotal" | "tvlUsd";
 const PAGE_SIZE = 25;
 const MIN_VAULT_TVL_USD = 100_000;
+const UI_PREFS_KEY = "easyhop_ui_prefs_v2";
 type ProgressStatus = "pending" | "in_progress" | "confirmed" | "failed";
 type TxFlowStep = {
   label: string;
   status: ProgressStatus;
   signature?: string;
+};
+
+type UiPrefs = {
+  action?: "deposit" | "withdraw" | "hop";
+  query?: string;
+  depositSlippage?: string;
+  withdrawSlippage?: string;
+  hopSlippage?: string;
+  depositPriorityFee?: "auto" | "low" | "off";
+  withdrawPriorityFee?: "auto" | "low" | "off";
+  hopPriorityFee?: "auto" | "low" | "off";
 };
 
 export default function App() {
@@ -178,6 +190,51 @@ export default function App() {
       setWallet(provider);
     }
   }, []);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(UI_PREFS_KEY);
+      if (!raw) return;
+      const prefs = JSON.parse(raw) as UiPrefs;
+      if (prefs.action) setActiveAction(prefs.action);
+      if (typeof prefs.query === "string") setVaultQuery(prefs.query);
+      if (typeof prefs.depositSlippage === "string") setDepositSlippage(prefs.depositSlippage);
+      if (typeof prefs.withdrawSlippage === "string") setWithdrawSlippage(prefs.withdrawSlippage);
+      if (typeof prefs.hopSlippage === "string") setHopSlippage(prefs.hopSlippage);
+      if (prefs.depositPriorityFee) setDepositPriorityFee(prefs.depositPriorityFee);
+      if (prefs.withdrawPriorityFee) setWithdrawPriorityFee(prefs.withdrawPriorityFee);
+      if (prefs.hopPriorityFee) setHopPriorityFee(prefs.hopPriorityFee);
+    } catch {
+      // Ignore invalid local storage state.
+    }
+  }, []);
+
+  useEffect(() => {
+    const prefs: UiPrefs = {
+      action: activeAction,
+      query: vaultQuery,
+      depositSlippage,
+      withdrawSlippage,
+      hopSlippage,
+      depositPriorityFee,
+      withdrawPriorityFee,
+      hopPriorityFee
+    };
+    try {
+      localStorage.setItem(UI_PREFS_KEY, JSON.stringify(prefs));
+    } catch {
+      // Ignore write failures (private mode, etc.).
+    }
+  }, [
+    activeAction,
+    vaultQuery,
+    depositSlippage,
+    withdrawSlippage,
+    hopSlippage,
+    depositPriorityFee,
+    withdrawPriorityFee,
+    hopPriorityFee
+  ]);
 
   const refreshSolBalance = async (isMounted: () => boolean) => {
     if (!wallet?.publicKey) return;
@@ -584,6 +641,93 @@ export default function App() {
   const sortIndicator = (key: SortKey) => {
     if (sortKey !== key) return "↕";
     return sortDir === "asc" ? "↑" : "↓";
+  };
+
+  const averageApy = useMemo(() => {
+    if (!sortedVaults.length) return 0;
+    return sortedVaults.reduce((sum, vault) => sum + (vault.apyTotal || 0), 0) / sortedVaults.length;
+  }, [sortedVaults]);
+
+  const totalTrackedTvl = useMemo(
+    () => sortedVaults.reduce((sum, vault) => sum + (vault.tvlUsd || 0), 0),
+    [sortedVaults]
+  );
+
+  const activeFlowSteps = useMemo(() => {
+    if (activeAction === "deposit") {
+      if (!depositFlow.visible) return [] as TxFlowStep[];
+      return [
+        { label: "swap", status: depositFlow.swap },
+        { label: "deposit", status: depositFlow.deposit }
+      ];
+    }
+    if (activeAction === "withdraw") return withdrawFlow;
+    return hopFlow;
+  }, [activeAction, depositFlow, hopFlow, withdrawFlow]);
+
+  const preflightLines = useMemo(() => {
+    if (activeAction === "deposit") {
+      const destination = selectedVault ? selectedVault.vaultName : "Select destination vault";
+      const amount =
+        depositSource === "sol"
+          ? `${depositSolAmount || "0"} SOL`
+          : `${moveAmount || "0"} ${selectedVault?.assetSymbol ?? "token"}`;
+      return [
+        `Source: ${depositSource === "sol" ? "SOL wallet balance" : "Wallet vault token"}`,
+        `Destination: ${destination}`,
+        `Amount: ${amount}`,
+        `Slippage: ${depositSlippage}%`
+      ];
+    }
+    if (activeAction === "withdraw") {
+      const from = withdrawVault ? withdrawVault.vaultName : "Select source vault";
+      return [
+        `Source: ${from}`,
+        `Receive: ${withdrawTarget === "sol" ? "SOL" : "Vault token"}`,
+        `Amount: ${withdrawAmount || "0"}`,
+        `Slippage: ${withdrawSlippage}%`
+      ];
+    }
+    const from = hopFromVault ? hopFromVault.vaultName : "Select source vault";
+    const to = hopToVault ? hopToVault.vaultName : "Select destination vault";
+    return [
+      `Source: ${from}`,
+      `Destination: ${to}`,
+      `Amount: ${hopAmount || "0"}`,
+      `Slippage: ${hopSlippage}%`
+    ];
+  }, [
+    activeAction,
+    depositSlippage,
+    depositSolAmount,
+    depositSource,
+    hopAmount,
+    hopFromVault,
+    hopSlippage,
+    hopToVault,
+    moveAmount,
+    selectedVault,
+    withdrawAmount,
+    withdrawSlippage,
+    withdrawTarget,
+    withdrawVault
+  ]);
+
+  const quickSetAction = (vault: VaultMetric, action: "deposit" | "withdraw" | "hop") => {
+    setSelectedVaultId(vault.id);
+    if (action === "deposit") {
+      setDepositVaultId(vault.id);
+      setActiveAction("deposit");
+      return;
+    }
+    if (action === "withdraw") {
+      setWithdrawVaultId(vault.id);
+      setActiveAction("withdraw");
+      return;
+    }
+    setHopToVaultId(vault.id);
+    setActiveAction("hop");
+    setHopSelectMode("from");
   };
 
   const selectVaultFromTable = (vault: VaultMetric) => {
@@ -1320,7 +1464,52 @@ export default function App() {
   }
 
   return (
-    <div className="page layout">
+    <div className="page">
+      <section className="card workspace-summary">
+        <div className="summary-head">
+          <div>
+            <p className="eyebrow">Workspace</p>
+            <h1>Kamino Vault Workspace</h1>
+            <p className="subhead">Pick vaults, review preflight, then execute in manual steps.</p>
+          </div>
+          <div className="wallet-inline">
+            <span className="muted">Wallet</span>
+            <strong>{wallet ? truncateAddress(wallet.publicKey?.toBase58() ?? "") : "Not connected"}</strong>
+          </div>
+        </div>
+        <div className="summary-grid">
+          <div className="summary-item">
+            <span className="muted">Visible vaults</span>
+            <span className="summary-value">{sortedVaults.length}</span>
+          </div>
+          <div className="summary-item">
+            <span className="muted">Tracked TVL</span>
+            <span className="summary-value">{formatUsd(totalTrackedTvl)}</span>
+          </div>
+          <div className="summary-item">
+            <span className="muted">Avg APY</span>
+            <span className="summary-value">{formatPercent(averageApy)}</span>
+          </div>
+          <div className="summary-item">
+            <span className="muted">Active positions</span>
+            <span className="summary-value">
+              {wallet ? kaminoPositionsWithBalance.length : "—"}
+            </span>
+          </div>
+          <div className="summary-item">
+            <span className="muted">SOL balance</span>
+            <span className="summary-value">
+              {solBalanceLoading
+                ? "Loading..."
+                : solBalance !== null
+                  ? `${solBalance.toFixed(4)} SOL`
+                  : "—"}
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <div className="layout">
       <aside className="sidebar">
         <div className="brand">
           <p className="eyebrow">EasyHop Solana</p>
@@ -1413,8 +1602,8 @@ export default function App() {
         <header className="header">
           <div>
             <p className="eyebrow">Vaults</p>
-            <h1>Kamino Lend vaults</h1>
-            <p className="subhead">Select a vault to fund it from SOL or another position.</p>
+            <h1>Vault explorer</h1>
+            <p className="subhead">Search and trigger actions directly from each vault row.</p>
           </div>
           <div className="filter-field">
             <input
@@ -1429,6 +1618,11 @@ export default function App() {
               </span>
             )}
           </div>
+          {vaultQuery && (
+            <button className="ghost" type="button" onClick={() => setVaultQuery("")}>
+              Clear filter
+            </button>
+          )}
         </header>
 
         <section className="card">
@@ -1485,7 +1679,37 @@ export default function App() {
                   <span className="vault-asset">{vault.assetSymbol}</span>
                   <span className="vault-metric strong">{formatPercent(vault.apyTotal)}</span>
                   <span className="vault-metric">{formatUsd(vault.tvlUsd)}</span>
-                  <span>
+                  <span className="vault-row-actions">
+                    <button
+                      type="button"
+                      className="ghost vault-action-btn"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        quickSetAction(vault, "deposit");
+                      }}
+                    >
+                      Fund
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost vault-action-btn"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        quickSetAction(vault, "withdraw");
+                      }}
+                    >
+                      Withdraw
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost vault-action-btn"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        quickSetAction(vault, "hop");
+                      }}
+                    >
+                      Hop
+                    </button>
                     <a
                       href={vault.vaultUrl}
                       target="_blank"
@@ -1501,7 +1725,12 @@ export default function App() {
               );
             })}
             {pageVaults.length === 0 && (
-              <div className="row vault-empty">No vaults match the current filter.</div>
+              <div className="row vault-empty">
+                <span>No vaults match the current filter.</span>
+                <button className="ghost" type="button" onClick={() => setVaultQuery("")}>
+                  Reset filters
+                </button>
+              </div>
             )}
           </div>
           {totalPages > 1 && (
@@ -1565,6 +1794,18 @@ export default function App() {
                 Hop
               </button>
             </div>
+          </div>
+
+          <div className="preflight-box">
+            <div className="preflight-head">
+              <span className="muted">Preflight summary</span>
+              <span className="tag">{activeAction.toUpperCase()}</span>
+            </div>
+            {preflightLines.map((line) => (
+              <div key={line} className="preflight-line">
+                {line}
+              </div>
+            ))}
           </div>
 
           {activeAction === "deposit" && (
@@ -2255,6 +2496,35 @@ export default function App() {
 
         <section className="card sidebar-card">
           <div className="sidebar-head">
+            <h2>Transaction timeline</h2>
+            <p className="muted">Live status for the current action flow.</p>
+          </div>
+          {activeFlowSteps.length > 0 ? (
+            <div className="flow-progress">
+              <div className="flow-steps">
+                {activeFlowSteps.map((step) => (
+                  <div key={step.label} className={`flow-step ${step.status}`}>
+                    <div className="flow-dot" />
+                    <div>
+                      <div className="flow-title">{step.label}</div>
+                      <div className="muted flow-state">{flowStateLabel(step.status)}</div>
+                      {step.signature && (
+                        <div className="muted flow-state">
+                          Signature: {truncateAddress(step.signature)}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <p className="muted">No active transaction yet.</p>
+          )}
+        </section>
+
+        <section className="card sidebar-card">
+          <div className="sidebar-head">
             <h2>Selected vault</h2>
             <p className="muted">Quick details for the vault in focus.</p>
           </div>
@@ -2278,6 +2548,33 @@ export default function App() {
           )}
         </section>
       </aside>
+      </div>
+
+      <div className="mobile-action-bar">
+        <div>
+          <div className="muted">Current action</div>
+          <div className="mobile-action-title">{activeAction}</div>
+        </div>
+        {activeAction === "deposit" && (
+          <button className="primary" onClick={handleDeposit} disabled={depositing || !selectedVault}>
+            {depositing ? "Processing..." : "Fund vault"}
+          </button>
+        )}
+        {activeAction === "withdraw" && (
+          <button
+            className="primary"
+            onClick={handleWithdraw}
+            disabled={withdrawing || positionsLoading || withdrawAvailable <= 0}
+          >
+            {withdrawing ? "Processing..." : "Withdraw"}
+          </button>
+        )}
+        {activeAction === "hop" && (
+          <button className="primary" onClick={handleHop} disabled={hopping}>
+            {hopping ? "Processing..." : "Hop vaults"}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
