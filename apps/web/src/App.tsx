@@ -409,26 +409,6 @@ export default function App() {
     depositSource === "sol" && Boolean(selectedVault && selectedVault.assetMint !== SOL_MINT);
   const showHopSwap =
     Boolean(hopFromVault && hopToVault && hopFromVault.assetMint !== hopToVault.assetMint);
-  const actionPath = (() => {
-    if (activeAction === "deposit") {
-      if (!selectedVault) return "Select a vault to see the path.";
-      if (depositSource === "sol") {
-        return `SOL → ${selectedVault.assetSymbol} → ${selectedVault.vaultName}`;
-      }
-      return `${selectedVault.assetSymbol} (wallet) → ${selectedVault.vaultName}`;
-    }
-    if (activeAction === "withdraw") {
-      if (!withdrawVault) return "Select a vault to see the path.";
-      return withdrawTarget === "sol"
-        ? `${withdrawVault.assetSymbol} → SOL`
-        : `${withdrawVault.assetSymbol} → Wallet`;
-    }
-    if (activeAction === "hop") {
-      if (!hopFromVault || !hopToVault) return "Select both source and destination vaults.";
-      return `${hopFromVault.assetSymbol} → ${hopToVault.assetSymbol} → ${hopToVault.vaultName}`;
-    }
-    return "";
-  })();
   useEffect(() => {
     setDepositSetup(null);
     setDepositSetupError(null);
@@ -676,25 +656,6 @@ export default function App() {
         return `${tx.label}: ${parts.join(", ")}`;
       })
       .join("\n");
-  };
-
-  const summarizeFeeDiagnostics = (details: FeeDiagnostics | null) => {
-    if (!details) return null;
-    if (details.totalLamports === undefined && !details.transactions.length) return null;
-    const totalLamports =
-      typeof details.totalLamports === "number"
-        ? details.totalLamports
-        : details.transactions.reduce((acc, tx) => {
-            const fee =
-              typeof tx.estimatedNetworkFeeLamports === "number"
-                ? tx.estimatedNetworkFeeLamports
-                : typeof tx.estimatedPriorityFeeLamports === "number"
-                  ? tx.estimatedPriorityFeeLamports
-                  : 0;
-            return acc + fee;
-          }, 0);
-    if (totalLamports <= 0) return null;
-    return `${(totalLamports / 1_000_000_000).toFixed(6)} SOL`;
   };
 
   const formatConnectError = (err: unknown) => {
@@ -2290,58 +2251,6 @@ export default function App() {
               )}
             </div>
           )}
-        </section>
-
-        <section className="card sidebar-card">
-          <div className="sidebar-head">
-            <h2>Route</h2>
-            <p className="muted">Preview the swap path and fees.</p>
-          </div>
-          <div className="route-box">
-            <div className="route-path">{actionPath}</div>
-            <div className="route-meta">
-              <div>
-                <span className="muted">Slippage</span>
-                <span className="route-value">
-                  {activeAction === "deposit"
-                    ? depositSlippage
-                    : activeAction === "withdraw"
-                      ? withdrawSlippage
-                      : hopSlippage}
-                  %
-                </span>
-              </div>
-              <div>
-                <span className="muted">Priority fee</span>
-                <span className="route-value">
-                  {activeAction === "deposit"
-                    ? depositPriorityFee
-                    : activeAction === "withdraw"
-                      ? withdrawPriorityFee
-                      : hopPriorityFee}
-                </span>
-              </div>
-              <div>
-                <span className="muted">Est. priority fee</span>
-                <span className="route-value">
-                  {activeAction === "deposit"
-                    ? summarizeFeeDiagnostics(depositFeeDetails) ?? "—"
-                    : activeAction === "withdraw"
-                      ? summarizeFeeDiagnostics(withdrawFeeDetails) ?? "—"
-                      : summarizeFeeDiagnostics(hopFeeDetails) ?? "—"}
-                </span>
-              </div>
-            </div>
-            {showDepositSwap && activeAction === "deposit" && (
-              <div className="inline-badge">Includes Jupiter swap</div>
-            )}
-            {activeAction === "withdraw" && withdrawTarget === "sol" && (
-              <div className="inline-badge">Includes Jupiter swap</div>
-            )}
-            {activeAction === "hop" && showHopSwap && (
-              <div className="inline-badge">Includes Jupiter swap</div>
-            )}
-          </div>
         </section>
 
         <section className="card sidebar-card">

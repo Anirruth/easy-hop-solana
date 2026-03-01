@@ -1,41 +1,70 @@
 EasyHop Solana
 
-Hopper-style Solana lending vault aggregator focused on:
-- Kamino Lend
+Kamino-focused Solana vault app with:
+- Live vault discovery and metrics
+- Wallet position tracking
+- Manual-step funding, withdrawing, and vault hopping
 
-This repo contains a lightweight API for vault/metrics data and a simple
-web UI to browse vaults and initiate a one-click move (withdraw -> deposit).
+The repo is split into:
+- `apps/api`: Express API for vault data and transaction building
+- `apps/web`: React + Vite UI for browsing vaults and running actions
 
-Structure
-- apps/api: Express API with protocol adapters and normalized vault metrics
-- apps/web: React UI (Vite) showing vaults across protocols
+## Current scope
+- Protocol shown in UI: Kamino Lend
+- Vault list in UI is filtered to TVL >= `$100,000`
+- Vault actions supported in UI:
+  - Fund vault from wallet token
+  - Fund vault from SOL (swap via Jupiter)
+  - Withdraw vault asset
+  - Withdraw to SOL (swap via Jupiter)
+  - Hop from one vault to another (withdraw -> swap if needed -> deposit)
+  - Preview/create/close token accounts
 
-Quick start
-1) API
-   cd apps/api
-   npm install
-   npm run dev
+## Quick start
+1. Start API
+   - `cd apps/api`
+   - `npm install`
+   - `cp .env.example .env`
+   - fill `.env`
+   - `npm run dev`
+2. Start Web (new terminal)
+   - `cd apps/web`
+   - `npm install`
+   - `cp .env.example .env`
+   - fill `.env`
+   - `npm run dev`
 
-2) Web
-   cd apps/web
-   npm install
-   npm run dev
-
-Environment
-Copy the example files and fill in real values:
+## Environment variables
 
 API (`apps/api/.env.example`)
-- `SOLANA_RPC_URL` (recommended) Dedicated mainnet RPC to avoid 429s.
-- `SOLANA_RPC_FALLBACK_URL` Optional fallback RPC.
-- `JUPITER_API_KEY` Required for swaps (get one at https://portal.jup.ag).
-- `JUPITER_API_BASE` Optional override (default: https://api.jup.ag/swap/v1).
+- `PORT`: API port (`4000` default)
+- `SOLANA_RPC_URL`: primary Solana mainnet RPC
+- `SOLANA_RPC_FALLBACK_URL`: optional fallback RPC
+- `JUPITER_API_KEY`: required for SOL/token and cross-asset swaps
+- `JUPITER_API_BASE`: optional Jupiter base override (default `https://api.jup.ag/swap/v1`)
 
 Web (`apps/web/.env.example`)
-- `VITE_API_URL` Base URL for the API (default: http://localhost:4000).
-- `VITE_SOLANA_RPC_URL` Optional custom RPC for the web app.
+- `VITE_API_URL`: API base URL (default `http://localhost:4000`)
+- `VITE_SOLANA_RPC_URL`: optional client RPC override
 
-Notes
-- The API fetches live vault metrics for Kamino Lend.
-- The API builds withdraw/swap/deposit transactions and the UI signs
-  and submits them with the user wallet.
-- Cross-asset moves and SOL->token deposits use Jupiter swaps.
+## API routes (high level)
+- `GET /health`
+- `GET /vaults`
+- `GET /vaults/:id`
+- `GET /vaults/:id/history`
+- `GET /positions?walletAddress=<pubkey>`
+- `GET /protocols`
+- `POST /move/deposit/build`
+- `POST /move/deposit/sol/quote`
+- `POST /move/deposit/sol/build`
+- `POST /move/withdraw/build`
+- `POST /move/swap/build`
+- `POST /move/build` (full hop/move build)
+- `POST /move/accounts/preview`
+- `POST /move/accounts/create`
+- `POST /move/accounts/close`
+- `POST /transactions/send`
+
+## Notes
+- Swaps depend on Jupiter; set `JUPITER_API_KEY` in API env.
+- If your RPC blocks transaction submission from browser RPC endpoints, the web app can relay signed transactions through `POST /transactions/send`.
