@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Connection, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { Connection, LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
 import { fetchPositions, fetchVaults } from "./api";
 import { VaultMetric, VaultPosition } from "./types";
 import {
@@ -14,11 +14,12 @@ import {
   FundProgressEvent,
   TransactionProgressEvent,
   createDepositAccounts,
+  depositFunds,
   depositFundsFromSol,
-  moveFunds,
   previewSolFundQuote,
   previewDepositAccounts,
   SolFundQuote,
+  swapAsset,
   swapAssetToSol,
   withdrawFunds,
   closeTokenAccounts
@@ -77,13 +78,15 @@ export default function App() {
   const [vaults, setVaults] = useState<VaultMetric[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [fromVaultId, setFromVaultId] = useState("");
   const [moveAmount, setMoveAmount] = useState("");
   const [depositVaultId, setDepositVaultId] = useState("");
   const [depositSolAmount, setDepositSolAmount] = useState("");
-  const [depositSource, setDepositSource] = useState<"vault" | "sol">("sol");
+  const [depositSource, setDepositSource] = useState<"sol" | "wallet">("sol");
   const [depositSlippage, setDepositSlippage] = useState("0.5");
   const [depositPriorityFee, setDepositPriorityFee] = useState<"auto" | "low" | "off">("off");
+  const [depositTokenBalance, setDepositTokenBalance] = useState<number | null>(null);
+  const [depositTokenBalanceLoading, setDepositTokenBalanceLoading] = useState(false);
+  const [depositTokenBalanceError, setDepositTokenBalanceError] = useState<string | null>(null);
   const [depositSetup, setDepositSetup] = useState<AccountSetupPreview | null>(null);
   const [depositSetupLoading, setDepositSetupLoading] = useState(false);
   const [depositSetupError, setDepositSetupError] = useState<string | null>(null);
@@ -92,7 +95,6 @@ export default function App() {
   const [withdrawTarget, setWithdrawTarget] = useState<"asset" | "sol">("asset");
   const [withdrawSlippage, setWithdrawSlippage] = useState("0.5");
   const [withdrawPriorityFee, setWithdrawPriorityFee] = useState<"auto" | "low" | "off">("off");
-  const [bundleSwap, setBundleSwap] = useState(true);
   const [wallet, setWallet] = useState<WalletProvider | null>(null);
   const [depositing, setDepositing] = useState(false);
   const [depositResult, setDepositResult] = useState<string | null>(null);
@@ -204,6 +206,89 @@ export default function App() {
     }
   };
 
+  const readWalletMintBalance = async (
+    walletPublicKey: PublicKey,
+    mintAddress: string
+  ): Promise<number> => {
+    if (mintAddress === SOL_MINT) {
+      for (const rpcUrl of DEFAULT_RPCS) {
+        try {
+          const connection = new Connection(rpcUrl, "confirmed");
+          const lamports = await connection.getBalance(walletPublicKey, "confirmed");
+          return lamports / LAMPORTS_PER_SOL;
+        } catch {
+          continue;
+        }
+      }
+      throw new Error("All RPCs failed");
+    }
+
+    const mint = new PublicKey(mintAddress);
+    for (const rpcUrl of DEFAULT_RPCS) {
+      try {
+        const connection = new Connection(rpcUrl, "confirmed");
+        const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
+          walletPublicKey,
+          { mint },
+          "confirmed"
+        );
+        return tokenAccounts.value.reduce((sum, accountInfo) => {
+          const tokenAmount = (accountInfo.account.data as any)?.parsed?.info?.tokenAmount;
+          const uiAmountString = tokenAmount?.uiAmountString;
+          const uiAmount =
+            typeof uiAmountString === "string" && uiAmountString.trim()
+              ? Number(uiAmountString)
+              : Number(tokenAmount?.uiAmount ?? 0);
+          return Number.isFinite(uiAmount) ? sum + uiAmount : sum;
+        }, 0);
+      } catch {
+        continue;
+      }
+    }
+    throw new Error("All RPCs failed");
+  };
+
+  const readWalletMintBalanceBaseUnits = async (
+    walletPublicKey: PublicKey,
+    mintAddress: string
+  ): Promise<bigint> => {
+    if (mintAddress === SOL_MINT) {
+      for (const rpcUrl of DEFAULT_RPCS) {
+        try {
+          const connection = new Connection(rpcUrl, "confirmed");
+          const lamports = await connection.getBalance(walletPublicKey, "confirmed");
+          return BigInt(lamports);
+        } catch {
+          continue;
+        }
+      }
+      throw new Error("All RPCs failed");
+    }
+
+    const mint = new PublicKey(mintAddress);
+    for (const rpcUrl of DEFAULT_RPCS) {
+      try {
+        const connection = new Connection(rpcUrl, "confirmed");
+        const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
+          walletPublicKey,
+          { mint },
+          "confirmed"
+        );
+        return tokenAccounts.value.reduce((sum, accountInfo) => {
+          const tokenAmount = (accountInfo.account.data as any)?.parsed?.info?.tokenAmount;
+          const rawAmount = tokenAmount?.amount;
+          if (typeof rawAmount === "string" && rawAmount.trim()) {
+            return sum + BigInt(rawAmount);
+          }
+          return sum;
+        }, 0n);
+      } catch {
+        continue;
+      }
+    }
+    throw new Error("All RPCs failed");
+  };
+
   useEffect(() => {
     if (!wallet?.publicKey) {
       setSolBalance(null);
@@ -296,20 +381,16 @@ export default function App() {
     }));
   }, [vaultOptions, vaults, positions, wallet]);
 
-  const fromVault = vaults.find((vault) => vault.id === fromVaultId);
   const depositVault = vaults.find((vault) => vault.id === depositVaultId);
   const withdrawVault = vaults.find((vault) => vault.id === withdrawVaultId);
   const selectedVault = vaults.find((vault) => vault.id === selectedVaultId);
   const hopFromVault = vaults.find((vault) => vault.id === hopFromVaultId);
   const hopToVault = vaults.find((vault) => vault.id === hopToVaultId);
-  const fromPosition = fromVault ? positions[fromVault.id] : undefined;
-  const availableAmount = fromPosition?.availableAmount ?? 0;
   const withdrawPosition = withdrawVault ? positions[withdrawVault.id] : undefined;
   const withdrawAvailable = withdrawPosition?.availableAmount ?? 0;
+  const hopAvailable = hopFromVault ? positions[hopFromVault.id]?.availableAmount ?? 0 : 0;
   const showDepositSwap =
-    depositSource === "sol" ||
-    (depositSource === "vault" &&
-      Boolean(fromVault && selectedVault && fromVault.assetMint !== selectedVault.assetMint));
+    depositSource === "sol" && Boolean(selectedVault && selectedVault.assetMint !== SOL_MINT);
   const showHopSwap =
     Boolean(hopFromVault && hopToVault && hopFromVault.assetMint !== hopToVault.assetMint);
   const actionPath = (() => {
@@ -318,8 +399,7 @@ export default function App() {
       if (depositSource === "sol") {
         return `SOL → ${selectedVault.assetSymbol} → ${selectedVault.vaultName}`;
       }
-      if (!fromVault) return "Select a source vault to see the path.";
-      return `${fromVault.assetSymbol} → ${selectedVault.assetSymbol} → ${selectedVault.vaultName}`;
+      return `${selectedVault.assetSymbol} (wallet) → ${selectedVault.vaultName}`;
     }
     if (activeAction === "withdraw") {
       if (!withdrawVault) return "Select a vault to see the path.";
@@ -333,14 +413,6 @@ export default function App() {
     }
     return "";
   })();
-  useEffect(() => {
-    if (!fromVault) {
-      setMoveAmount("");
-      return;
-    }
-    setMoveAmount((current) => (current ? current : availableAmount.toString()));
-  }, [fromVault?.id, availableAmount]);
-
   useEffect(() => {
     setDepositSetup(null);
     setDepositSetupError(null);
@@ -373,9 +445,8 @@ export default function App() {
       setHopAmount("");
       return;
     }
-    const sourceAvailable = positions[hopFromVault.id]?.availableAmount ?? 0;
-    setHopAmount((current) => (current ? current : sourceAvailable.toString()));
-  }, [hopFromVault?.id, positions]);
+    setHopAmount((current) => (current ? current : hopAvailable.toString()));
+  }, [hopFromVault?.id, hopAvailable]);
 
   useEffect(() => {
     if (depositSource !== "sol") {
@@ -392,10 +463,63 @@ export default function App() {
     setSolFundQuoteError(null);
   }, [depositVaultId, depositSolAmount, depositPriorityFee, depositSlippage, depositSource]);
 
+  const refreshDepositTokenBalance = async (isMounted: () => boolean) => {
+    if (depositSource !== "wallet") {
+      if (isMounted()) {
+        setDepositTokenBalance(null);
+        setDepositTokenBalanceError(null);
+        setDepositTokenBalanceLoading(false);
+      }
+      return;
+    }
+    if (!depositVault?.assetMint) {
+      if (isMounted()) {
+        setDepositTokenBalance(null);
+        setDepositTokenBalanceError("Select a destination vault first.");
+        setDepositTokenBalanceLoading(false);
+      }
+      return;
+    }
+    if (!wallet?.publicKey) {
+      if (isMounted()) {
+        setDepositTokenBalance(null);
+        setDepositTokenBalanceError("Connect your wallet to view token balance.");
+        setDepositTokenBalanceLoading(false);
+      }
+      return;
+    }
+
+    setDepositTokenBalanceLoading(true);
+    setDepositTokenBalanceError(null);
+    try {
+      const amount = await readWalletMintBalance(wallet.publicKey!, depositVault.assetMint);
+      if (isMounted()) {
+        setDepositTokenBalance(amount);
+      }
+    } catch {
+      if (isMounted()) {
+        setDepositTokenBalance(null);
+        setDepositTokenBalanceError("Failed to load wallet token balance.");
+      }
+    } finally {
+      if (isMounted()) {
+        setDepositTokenBalanceLoading(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    let mounted = true;
+    refreshDepositTokenBalance(() => mounted);
+    return () => {
+      mounted = false;
+    };
+  }, [depositSource, depositVaultId, wallet?.publicKey?.toBase58()]);
+
   useEffect(() => {
     setManualSwapResult(null);
     setManualSwapFeeDetails(null);
-  }, [withdrawAmount, bundleSwap]);
+  }, [withdrawAmount]);
 
   useEffect(() => {
     setCloseAccountsResult(null);
@@ -468,6 +592,20 @@ export default function App() {
     if (!withdrawVault || withdrawAvailable <= 0) return;
     const nextAmount = withdrawAvailable * fraction;
     setWithdrawAmount(toInputAmount(nextAmount, withdrawVault.assetDecimals));
+  };
+
+  const applyHopPreset = (fraction: number) => {
+    if (!hopFromVault || hopAvailable <= 0) return;
+    const nextAmount = hopAvailable * fraction;
+    setHopAmount(toInputAmount(nextAmount, hopFromVault.assetDecimals));
+  };
+
+  const applyDepositWalletPreset = (fraction: number) => {
+    if (depositSource !== "wallet" || !depositVault) return;
+    const balance = depositTokenBalance ?? 0;
+    if (!Number.isFinite(balance) || balance <= 0) return;
+    const nextAmount = balance * fraction;
+    setMoveAmount(toInputAmount(nextAmount, depositVault.assetDecimals));
   };
 
   const formatFeeDiagnostics = (details: FeeDiagnostics | null) => {
@@ -673,30 +811,17 @@ export default function App() {
         return;
       }
 
-      if (!fromVault) {
-        setDepositResult("Select a source vault to swap from.");
-        return;
-      }
-      if (fromVault.id === depositVault.id) {
-        setDepositResult("Source and destination vaults must be different.");
-        return;
-      }
-      if (availableAmount <= 0) {
-        setDepositResult("No available balance to move from this vault.");
-        return;
-      }
       const amount = Number(moveAmount);
       if (!Number.isFinite(amount) || amount <= 0) {
-        setDepositResult("Enter a valid amount to move.");
+        setDepositResult("Enter a valid token amount to deposit.");
         return;
       }
-      if (amount > availableAmount) {
-        setDepositResult("Amount exceeds available balance in this vault.");
+      if (depositTokenBalance !== null && amount > depositTokenBalance) {
+        setDepositResult("Amount exceeds wallet balance for this vault token.");
         return;
       }
-      const diagnostics = await moveFunds(
+      const diagnostics = await depositFunds(
         provider,
-        fromVault,
         depositVault,
         amount,
         slippagePct,
@@ -707,7 +832,8 @@ export default function App() {
         setDepositFeeDetails(diagnostics);
       }
       await loadPositions(provider.publicKey!.toBase58(), false);
-      setDepositResult("Move complete. Funds deposited into the selected vault.");
+      await refreshDepositTokenBalance(() => true);
+      setDepositResult("Deposit complete. Wallet token deposited into vault.");
     } catch (err) {
       if (depositSource === "sol") {
         setDepositFlow((current) => ({
@@ -852,8 +978,11 @@ export default function App() {
     setManualSwapFeeDetails(null);
     try {
       const shouldRunManualSwap =
-        !bundleSwap && withdrawTarget === "sol" && withdrawVault.assetMint !== SOL_MINT;
-      const finalDestination = bundleSwap ? withdrawTarget : "asset";
+        withdrawTarget === "sol" && withdrawVault.assetMint !== SOL_MINT;
+      const beforeWithdrawSourceBalanceBase = shouldRunManualSwap
+        ? await readWalletMintBalanceBaseUnits(provider.publicKey!, withdrawVault.assetMint)
+        : 0n;
+      const finalDestination = shouldRunManualSwap ? "asset" : withdrawTarget;
       const diagnostics = await withdrawFunds(
         provider,
         withdrawVault,
@@ -870,8 +999,18 @@ export default function App() {
         setWithdrawFeeDetails(diagnostics);
       }
       if (shouldRunManualSwap) {
+        const afterWithdrawSourceBalanceBase = await readWalletMintBalanceBaseUnits(
+          provider.publicKey!,
+          withdrawVault.assetMint
+        );
+        const withdrawnSourceBase =
+          afterWithdrawSourceBalanceBase > beforeWithdrawSourceBalanceBase
+            ? afterWithdrawSourceBalanceBase - beforeWithdrawSourceBalanceBase
+            : 0n;
         await runManualSwap(amount, {
           propagateError: true,
+          amountBaseOverride:
+            withdrawnSourceBase > 0n ? Number(withdrawnSourceBase) : undefined,
           onProgress: (event) => {
             setWithdrawFlow((current) =>
               upsertTxFlowStep(current, { ...event, label: "manual-swap" })
@@ -899,6 +1038,7 @@ export default function App() {
     options?: {
       propagateError?: boolean;
       onProgress?: (event: TransactionProgressEvent) => void;
+      amountBaseOverride?: number;
     }
   ) => {
     if (!withdrawVault) {
@@ -915,7 +1055,7 @@ export default function App() {
       setManualSwapResult("Enter a valid slippage percentage (0-100).");
       return;
     }
-    const lamports = toBaseUnits(amount, withdrawVault.assetDecimals);
+    const lamports = options?.amountBaseOverride ?? toBaseUnits(amount, withdrawVault.assetDecimals);
     setManualSwapping(true);
     setManualSwapResult(null);
     setManualSwapFeeDetails(null);
@@ -942,15 +1082,6 @@ export default function App() {
     } finally {
       setManualSwapping(false);
     }
-  };
-
-  const handleManualSwap = async () => {
-    const amount = Number(withdrawAmount);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      setManualSwapResult("Enter a valid swap amount.");
-      return;
-    }
-    await runManualSwap(amount);
   };
 
   const handleHop = async () => {
@@ -992,20 +1123,139 @@ export default function App() {
     setHopFlow([]);
     setHopFeeDetails(null);
     try {
-      const diagnostics = await moveFunds(
+      const closeSourceAccounts =
+        toBaseUnits(amount, hopFromVault.assetDecimals) >=
+        toBaseUnits(sourceAvailable, hopFromVault.assetDecimals);
+      try {
+        setHopFlow((current) =>
+          upsertTxFlowStep(current, {
+            label: "create-accounts",
+            status: "sending"
+          })
+        );
+        const setupVaults = [hopFromVault, hopToVault].filter(
+          (vault, index, list) => list.findIndex((item) => item.id === vault.id) === index
+        );
+        for (const vault of setupVaults) {
+          await createDepositAccounts(provider, vault);
+        }
+        setHopFlow((current) =>
+          upsertTxFlowStep(current, {
+            label: "create-accounts",
+            status: "confirmed"
+          })
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setHopFlow((current) =>
+          upsertTxFlowStep(current, {
+            label: "create-accounts",
+            status: "failed",
+            error: message
+          })
+        );
+        throw err;
+      }
+
+      const beforeWithdrawSourceBalanceBase = await readWalletMintBalanceBaseUnits(
+        provider.publicKey!,
+        hopFromVault.assetMint
+      );
+      const withdrawDiagnostics = await withdrawFunds(
         provider,
         hopFromVault,
-        hopToVault,
         amount,
+        "asset",
         slippagePct,
         hopPriorityFee,
         hopFeeDebug,
         (event) => {
-          setHopFlow((current) => upsertTxFlowStep(current, event));
+          setHopFlow((current) =>
+            upsertTxFlowStep(current, { ...event, label: "withdraw" })
+          );
         }
       );
-      if (hopFeeDebug) {
-        setHopFeeDetails(diagnostics);
+      if (hopFeeDebug && withdrawDiagnostics) {
+        setHopFeeDetails(withdrawDiagnostics);
+      }
+      const afterWithdrawSourceBalanceBase = await readWalletMintBalanceBaseUnits(
+        provider.publicKey!,
+        hopFromVault.assetMint
+      );
+      const withdrawnSourceBase =
+        afterWithdrawSourceBalanceBase > beforeWithdrawSourceBalanceBase
+          ? afterWithdrawSourceBalanceBase - beforeWithdrawSourceBalanceBase
+          : 0n;
+
+      let depositAmount = amount;
+      if (hopFromVault.assetMint !== hopToVault.assetMint) {
+        const swapInputBase =
+          withdrawnSourceBase > 0n
+            ? Number(withdrawnSourceBase)
+            : toBaseUnits(amount, hopFromVault.assetDecimals);
+        if (!Number.isFinite(swapInputBase) || swapInputBase <= 0) {
+          throw new Error("No source tokens available to swap after withdraw.");
+        }
+        const beforeSwapOutBalanceBase = await readWalletMintBalanceBaseUnits(
+          provider.publicKey!,
+          hopToVault.assetMint
+        );
+        await swapAsset(
+          provider,
+          hopFromVault.assetMint,
+          hopToVault.assetMint,
+          swapInputBase,
+          slippagePct,
+          hopPriorityFee,
+          hopFeeDebug,
+          (event) => {
+            setHopFlow((current) =>
+              upsertTxFlowStep(current, { ...event, label: "swap" })
+            );
+          }
+        );
+        const afterSwapOutBalanceBase = await readWalletMintBalanceBaseUnits(
+          provider.publicKey!,
+          hopToVault.assetMint
+        );
+        const receivedBase =
+          afterSwapOutBalanceBase > beforeSwapOutBalanceBase
+            ? afterSwapOutBalanceBase - beforeSwapOutBalanceBase
+            : 0n;
+        const received = Number(receivedBase) / 10 ** hopToVault.assetDecimals;
+        if (!Number.isFinite(received) || received <= 0) {
+          throw new Error(
+            "Swap completed but no destination tokens were detected in wallet for deposit."
+          );
+        }
+        depositAmount = received;
+      } else if (withdrawnSourceBase > 0n) {
+        const withdrawn = Number(withdrawnSourceBase) / 10 ** hopFromVault.assetDecimals;
+        if (Number.isFinite(withdrawn) && withdrawn > 0) {
+          depositAmount = withdrawn;
+        }
+      }
+
+      const depositDiagnostics = await depositFunds(
+        provider,
+        hopToVault,
+        depositAmount,
+        slippagePct,
+        hopPriorityFee,
+        hopFeeDebug
+      );
+      setHopFlow((current) =>
+        upsertTxFlowStep(current, { label: "deposit", status: "confirmed" })
+      );
+      if (hopFeeDebug && depositDiagnostics) {
+        setHopFeeDetails(depositDiagnostics);
+      }
+      if (closeSourceAccounts) {
+        try {
+          await closeTokenAccounts(provider, hopFromVault, false);
+        } catch {
+          // Best-effort close after full hop.
+        }
       }
       await loadPositions(provider.publicKey!.toBase58(), false);
       setHopResult("Hop complete. Funds moved into the destination vault.");
@@ -1369,29 +1619,13 @@ export default function App() {
                   <select
                     value={depositSource}
                     onChange={(event) =>
-                      setDepositSource(event.target.value === "sol" ? "sol" : "vault")
+                      setDepositSource(event.target.value === "sol" ? "sol" : "wallet")
                     }
                   >
                     <option value="sol">SOL balance (swap via Jupiter)</option>
-                    <option value="vault">Vault position</option>
+                    <option value="wallet">Vault token (wallet)</option>
                   </select>
                 </label>
-                {depositSource === "vault" && (
-                  <label>
-                    Source vault
-                    <select
-                      value={fromVaultId}
-                      onChange={(event) => setFromVaultId(event.target.value)}
-                    >
-                      <option value="">Select source vault</option>
-                      {fromVaultOptions.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )}
                 {depositSource === "sol" ? (
                   <label>
                     SOL max spend
@@ -1406,7 +1640,7 @@ export default function App() {
                   </label>
                 ) : (
                   <label>
-                    Amount
+                    Vault token amount
                     <input
                       type="number"
                       min="0"
@@ -1415,6 +1649,64 @@ export default function App() {
                       onChange={(event) => setMoveAmount(event.target.value)}
                       placeholder="0.0"
                     />
+                    <div className="quick-amounts">
+                      <button
+                        type="button"
+                        className="quick-amount"
+                        onClick={() => applyDepositWalletPreset(0.25)}
+                        disabled={
+                          depositSource !== "wallet" ||
+                          depositTokenBalanceLoading ||
+                          !depositVault ||
+                          !depositTokenBalance ||
+                          depositTokenBalance <= 0
+                        }
+                      >
+                        25%
+                      </button>
+                      <button
+                        type="button"
+                        className="quick-amount"
+                        onClick={() => applyDepositWalletPreset(0.5)}
+                        disabled={
+                          depositSource !== "wallet" ||
+                          depositTokenBalanceLoading ||
+                          !depositVault ||
+                          !depositTokenBalance ||
+                          depositTokenBalance <= 0
+                        }
+                      >
+                        50%
+                      </button>
+                      <button
+                        type="button"
+                        className="quick-amount"
+                        onClick={() => applyDepositWalletPreset(0.75)}
+                        disabled={
+                          depositSource !== "wallet" ||
+                          depositTokenBalanceLoading ||
+                          !depositVault ||
+                          !depositTokenBalance ||
+                          depositTokenBalance <= 0
+                        }
+                      >
+                        75%
+                      </button>
+                      <button
+                        type="button"
+                        className="quick-amount"
+                        onClick={() => applyDepositWalletPreset(1)}
+                        disabled={
+                          depositSource !== "wallet" ||
+                          depositTokenBalanceLoading ||
+                          !depositVault ||
+                          !depositTokenBalance ||
+                          depositTokenBalance <= 0
+                        }
+                      >
+                        100%
+                      </button>
+                    </div>
                   </label>
                 )}
                 <label>
@@ -1459,12 +1751,19 @@ export default function App() {
                   </select>
                 </label>
               </div>
-              {depositSource === "vault" && fromVault && (
+              {depositSource === "wallet" && depositVault && (
                 <div className="position-summary">
                   <div>
-                    <span className="muted">Available</span>
+                    <span className="muted">Wallet balance</span>
                     <span className="position-value">
-                      {formatTokenAmount(availableAmount, fromVault.assetSymbol)}
+                      {depositTokenBalanceLoading
+                        ? "Loading..."
+                        : depositTokenBalanceError
+                          ? depositTokenBalanceError
+                          : formatTokenAmount(
+                              depositTokenBalance ?? 0,
+                              depositVault.assetSymbol
+                            )}
                     </span>
                   </div>
                 </div>
@@ -1743,22 +2042,6 @@ export default function App() {
                     <option value="on">On</option>
                   </select>
                 </label>
-                <label>
-                  Swap handling
-                  <select
-                    value={bundleSwap ? "bundle" : "manual"}
-                    onChange={(event) => {
-                      const mode = event.target.value === "bundle";
-                      setBundleSwap(mode);
-                      if (withdrawTarget !== "sol") {
-                        setWithdrawTarget("sol");
-                      }
-                    }}
-                  >
-                    <option value="bundle">Bundle withdraw + swap</option>
-                    <option value="manual">Manual swap step</option>
-                  </select>
-                </label>
               </div>
               {withdrawVault && (
                 <div className="position-summary">
@@ -1783,19 +2066,6 @@ export default function App() {
                 )}
               </div>
               <div className="action-tools">
-                {!bundleSwap && (
-                  <button
-                    className="ghost"
-                    onClick={handleManualSwap}
-                    disabled={
-                      manualSwapping ||
-                      !withdrawVault ||
-                      !Number(withdrawAmount)
-                    }
-                  >
-                    {manualSwapping ? "Swapping..." : "Swap to SOL"}
-                  </button>
-                )}
                 <button
                   className="ghost"
                   onClick={() => handleCloseTokenAccounts(withdrawVault, withdrawFeeDebug)}
@@ -1881,6 +2151,45 @@ export default function App() {
                     onChange={(event) => setHopAmount(event.target.value)}
                     placeholder="0.0"
                   />
+                  <div className="quick-amounts">
+                    <button
+                      type="button"
+                      className="quick-amount"
+                      onClick={() => applyHopPreset(0.25)}
+                      disabled={!hopFromVault || hopAvailable <= 0}
+                    >
+                      25%
+                    </button>
+                    <button
+                      type="button"
+                      className="quick-amount"
+                      onClick={() => applyHopPreset(0.5)}
+                      disabled={!hopFromVault || hopAvailable <= 0}
+                    >
+                      50%
+                    </button>
+                    <button
+                      type="button"
+                      className="quick-amount"
+                      onClick={() => applyHopPreset(0.75)}
+                      disabled={!hopFromVault || hopAvailable <= 0}
+                    >
+                      75%
+                    </button>
+                    <button
+                      type="button"
+                      className="quick-amount"
+                      onClick={() => applyHopPreset(1)}
+                      disabled={!hopFromVault || hopAvailable <= 0}
+                    >
+                      100%
+                    </button>
+                  </div>
+                  <span className="muted">
+                    {hopFromVault
+                      ? `Available: ${formatTokenAmount(hopAvailable, hopFromVault.assetSymbol)}`
+                      : "Select a source vault to see available balance."}
+                  </span>
                 </label>
                 <label>
                   Slippage (%)

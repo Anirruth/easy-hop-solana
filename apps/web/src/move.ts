@@ -8,6 +8,7 @@ const RPC_URL =
   "https://api.mainnet-beta.solana.com";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:4000";
+const SOL_MINT = "So11111111111111111111111111111111111111112";
 
 function wrapNetworkError(err: unknown): never {
   const msg = err instanceof Error ? err.message : String(err);
@@ -230,6 +231,7 @@ const executeBuiltTransactions = async (
   onProgress?: (event: TransactionProgressEvent) => void,
   options: { batchSign?: boolean } = {}
 ) => {
+  if (!entries.length) return;
   const batchSign = options.batchSign ?? true;
   const connection = new Connection(RPC_URL, "confirmed");
   const txs = entries.map(deserializeBuiltTransaction);
@@ -282,7 +284,8 @@ export const moveFunds = async (
   slippagePct?: number,
   priorityFeeMode?: "auto" | "low" | "off",
   debugFee?: boolean,
-  onProgress?: (event: TransactionProgressEvent) => void
+  onProgress?: (event: TransactionProgressEvent) => void,
+  options?: { closeSourceAccounts?: boolean }
 ) => {
   let response: Response;
   try {
@@ -296,7 +299,8 @@ export const moveFunds = async (
         walletAddress: provider.publicKey!.toBase58(),
         slippagePct,
         priorityFeeMode,
-        debugFee
+        debugFee,
+        closeSourceAccounts: options?.closeSourceAccounts
       })
     });
   } catch (err) {
@@ -578,9 +582,10 @@ export const closeTokenAccounts = async (
   return json.data.feeDiagnostics ?? null;
 };
 
-export const swapAssetToSol = async (
+export const swapAsset = async (
   provider: WalletProvider,
   inputMint: string,
+  outputMint: string,
   amountLamports: number,
   slippagePct?: number,
   priorityFeeMode?: "auto" | "low" | "off",
@@ -595,6 +600,7 @@ export const swapAssetToSol = async (
       body: JSON.stringify({
         walletAddress: provider.publicKey!.toBase58(),
         inputMint,
+        outputMint,
         amountLamports,
         slippagePct,
         priorityFeeMode,
@@ -618,3 +624,23 @@ export const swapAssetToSol = async (
   await executeBuiltTransactions(provider, json.data.transactions, onProgress);
   return json.data.feeDiagnostics ?? null;
 };
+
+export const swapAssetToSol = async (
+  provider: WalletProvider,
+  inputMint: string,
+  amountLamports: number,
+  slippagePct?: number,
+  priorityFeeMode?: "auto" | "low" | "off",
+  debugFee?: boolean,
+  onProgress?: (event: TransactionProgressEvent) => void
+): Promise<FeeDiagnostics | null> =>
+  swapAsset(
+    provider,
+    inputMint,
+    SOL_MINT,
+    amountLamports,
+    slippagePct,
+    priorityFeeMode,
+    debugFee,
+    onProgress
+  );

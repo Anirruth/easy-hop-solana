@@ -38,6 +38,7 @@ export type MoveRequest = {
   slippagePct?: number;
   priorityFeeMode?: "auto" | "low" | "off";
   debugFee?: boolean;
+  closeSourceAccounts?: boolean;
 };
 
 export type MoveResponse = {

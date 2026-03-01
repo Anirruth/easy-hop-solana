@@ -829,8 +829,11 @@ const readTokenAccountAmount = (amountField: unknown): bigint => {
 const buildCloseTokenAccountTransactions = async (
   connection: Connection,
   wallet: PublicKey,
-  vault: VaultMetric
+  vault: VaultMetric,
+  options: { strictBalance?: boolean; checkCurrentBalance?: boolean; label?: string } = {}
 ): Promise<BuiltTransaction[]> => {
+  const strictBalance = options.strictBalance ?? true;
+  const checkCurrentBalance = options.checkCurrentBalance ?? true;
   const targets: Array<{ label: string; mint: string }> = [];
   if (vault.assetMint && vault.assetMint !== SOL_MINT) {
     targets.push({ label: "asset", mint: vault.assetMint });
@@ -856,10 +859,17 @@ const buildCloseTokenAccountTransactions = async (
     );
     const ataInfo = await connection.getAccountInfo(ata);
     if (!ataInfo) continue;
-    const accountData = AccountLayout.decode(Buffer.from(ataInfo.data));
-    const balance = readTokenAccountAmount((accountData as { amount?: unknown }).amount);
-    if (balance > 0n) {
-      throw new Error(`Cannot close ${target.label} token account while holding ${balance.toString()} tokens.`);
+    if (checkCurrentBalance) {
+      const accountData = AccountLayout.decode(Buffer.from(ataInfo.data));
+      const balance = readTokenAccountAmount((accountData as { amount?: unknown }).amount);
+      if (balance > 0n) {
+        if (strictBalance) {
+          throw new Error(
+            `Cannot close ${target.label} token account while holding ${balance.toString()} tokens.`
+          );
+        }
+        continue;
+      }
     }
     instructions.push({
       label: `close-${target.label}`,
@@ -868,7 +878,10 @@ const buildCloseTokenAccountTransactions = async (
   }
 
   if (!instructions.length) {
-    throw new Error("No associated token accounts found to close for this vault.");
+    if (strictBalance) {
+      throw new Error("No associated token accounts found to close for this vault.");
+    }
+    return [];
   }
 
   const tx = new Transaction();
@@ -876,7 +889,38 @@ const buildCloseTokenAccountTransactions = async (
   tx.recentBlockhash = blockhash;
   tx.feePayer = wallet;
   instructions.forEach((item) => tx.add(item.instruction));
-  return [serializeTx(tx, "close-token-accounts")];
+  return [serializeTx(tx, options.label ?? "close-token-accounts")];
+};
+
+const buildCreateMissingAccountsTransaction = async (
+  connection: Connection,
+  wallet: PublicKey,
+  missingAccounts: MissingAccount[]
+): Promise<BuiltTransaction | null> => {
+  if (!missingAccounts.length) return null;
+  const tx = new Transaction();
+  const seenAtas = new Set<string>();
+  missingAccounts.forEach((entry) => {
+    if (seenAtas.has(entry.ata)) return;
+    seenAtas.add(entry.ata);
+    const mintPk = new PublicKey(entry.mint);
+    const ataPk = new PublicKey(entry.ata);
+    const programId = new PublicKey(entry.tokenProgramId);
+    tx.add(
+      createAssociatedTokenAccountInstruction(
+        wallet,
+        ataPk,
+        wallet,
+        mintPk,
+        programId,
+        ASSOCIATED_TOKEN_PROGRAM_ID
+      )
+    );
+  });
+  const { blockhash } = await connection.getLatestBlockhash("finalized");
+  tx.recentBlockhash = blockhash;
+  tx.feePayer = wallet;
+  return serializeTx(tx, "create-accounts");
 };
 
 type SolDepositPlan = {
@@ -1010,6 +1054,7 @@ moveRouter.post("/build", async (req, res) => {
       slippagePct?: number;
       priorityFeeMode?: unknown;
       debugFee?: boolean;
+      closeSourceAccounts?: boolean;
     };
     if (
       typeof payload?.fromVaultId !== "string" ||
@@ -1040,21 +1085,13 @@ moveRouter.post("/build", async (req, res) => {
       buildMissingAccounts(connection, user, toVault)
     ]);
     if (fromMissing.length || toMissing.length) {
-      const fromRentLamports = fromMissing.reduce((sum, item) => sum + item.rentLamports, 0);
-      const toRentLamports = toMissing.reduce((sum, item) => sum + item.rentLamports, 0);
-      res.status(400).json({
-        error:
-          "Required token accounts are missing for hop. Create token accounts for source/destination vault first to avoid one-time SOL rent in the hop transaction.",
-        details: {
-          fromVaultId: fromVault.id,
-          fromMissingAccounts: fromMissing.length,
-          fromRentLamports,
-          toVaultId: toVault.id,
-          toMissingAccounts: toMissing.length,
-          toRentLamports
-        }
-      });
-      return;
+      const setupTx = await buildCreateMissingAccountsTransaction(connection, user, [
+        ...fromMissing,
+        ...toMissing
+      ]);
+      if (setupTx) {
+        transactions.push(setupTx);
+      }
     }
 
     const withdrawTxs = await buildProtocolTxs(
@@ -1106,6 +1143,15 @@ moveRouter.post("/build", async (req, res) => {
       transactions.push(serializeTx(tx, `deposit-${index + 1}`))
     );
 
+    if (payload.closeSourceAccounts) {
+      const closeTxs = await buildCloseTokenAccountTransactions(connection, user, fromVault, {
+        strictBalance: false,
+        checkCurrentBalance: false,
+        label: "close-source-token-accounts"
+      });
+      closeTxs.forEach((tx) => transactions.push(tx));
+    }
+
     const feeDiagnostics = payload.debugFee
       ? await buildFeeDiagnostics(connection, transactions)
       : undefined;
@@ -1150,15 +1196,18 @@ moveRouter.post("/deposit/build", async (req, res) => {
     const user = new PublicKey(payload.walletAddress);
     const connection = getPrimaryConnection();
     const priorityFeeMicroLamports = toPriorityFeeMicroLamports(payload.priorityFeeMode);
+    const transactions: BuiltTransaction[] = [];
     const missingAccounts = await buildMissingAccounts(connection, user, vault);
     if (missingAccounts.length) {
-      res.status(400).json({
-        error:
-          "Required token accounts are missing. Run 'Preview setup fees' and 'Create token accounts' first."
-      });
-      return;
+      const setupTx = await buildCreateMissingAccountsTransaction(
+        connection,
+        user,
+        missingAccounts
+      );
+      if (setupTx) {
+        transactions.push(setupTx);
+      }
     }
-    const transactions: BuiltTransaction[] = [];
     const txs = await buildProtocolTxs(
       connection,
       user,
@@ -1220,16 +1269,18 @@ moveRouter.post("/deposit/sol/build", async (req, res) => {
     const slippageBps = toSlippageBps(payload.slippagePct);
     const priorityFeeMicroLamports = toPriorityFeeMicroLamports(payload.priorityFeeMode);
     const requestedLamports = toBaseUnits(payload.amountSol, SOL_DECIMALS);
+    const transactions: BuiltTransaction[] = [];
     const missingAccounts = await buildMissingAccounts(connection, user, vault);
 
-    // Keep SOL funding predictable: do not auto-create accounts (which adds rent).
-    // Users can create accounts explicitly via Preview/Create setup actions.
     if (missingAccounts.length) {
-      res.status(400).json({
-        error:
-          "Required token accounts are missing. Run 'Preview setup fees' and 'Create token accounts' first."
-      });
-      return;
+      const setupTx = await buildCreateMissingAccountsTransaction(
+        connection,
+        user,
+        missingAccounts
+      );
+      if (setupTx) {
+        transactions.push(setupTx);
+      }
     }
 
     let plan: SolDepositPlan;
@@ -1251,12 +1302,14 @@ moveRouter.post("/deposit/sol/build", async (req, res) => {
       throw err;
     }
 
+    transactions.push(...plan.transactions);
+
     const feeDiagnostics = payload.debugFee
-      ? await buildFeeDiagnostics(connection, plan.transactions)
+      ? await buildFeeDiagnostics(connection, transactions)
       : undefined;
     res.json({
       data: {
-        transactions: plan.transactions,
+        transactions,
         feeDiagnostics,
         plan: {
           requestedLamports,
@@ -1475,6 +1528,7 @@ moveRouter.post("/swap/build", async (req, res) => {
     const payload = req.body as {
       walletAddress: string;
       inputMint: string;
+      outputMint?: string;
       amountLamports: number;
       slippagePct?: number;
       priorityFeeMode?: unknown;
@@ -1494,10 +1548,14 @@ moveRouter.post("/swap/build", async (req, res) => {
     const connection = getPrimaryConnection();
     const slippageBps = toSlippageBps(payload.slippagePct);
     const priorityFeeMicroLamports = toPriorityFeeMicroLamports(payload.priorityFeeMode);
+    const outputMint =
+      typeof payload.outputMint === "string" && payload.outputMint.trim()
+        ? payload.outputMint.trim()
+        : SOL_MINT;
     const swapTx = await buildJupiterSwapTx(
       user,
       payload.inputMint,
-      SOL_MINT,
+      outputMint,
       payload.amountLamports,
       slippageBps,
       priorityFeeMicroLamports
@@ -1590,29 +1648,15 @@ moveRouter.post("/accounts/create", async (req, res) => {
       return;
     }
 
-    const tx = new Transaction();
-    missingAccounts.forEach((entry) => {
-      const mintPk = new PublicKey(entry.mint);
-      const ataPk = new PublicKey(entry.ata);
-      const programId = new PublicKey(entry.tokenProgramId);
-      tx.add(
-        createAssociatedTokenAccountInstruction(
-          user,
-          ataPk,
-          user,
-          mintPk,
-          programId,
-          ASSOCIATED_TOKEN_PROGRAM_ID
-        )
-      );
-    });
-    const { blockhash } = await connection.getLatestBlockhash("finalized");
-    tx.recentBlockhash = blockhash;
-    tx.feePayer = user;
+    const setupTx = await buildCreateMissingAccountsTransaction(
+      connection,
+      user,
+      missingAccounts
+    );
 
     res.json({
       data: {
-        transactions: [serializeTx(tx, "create-accounts")],
+        transactions: setupTx ? [setupTx] : [],
         missingAccounts,
         totalRentLamports,
         totalRentSol: totalRentLamports / 1_000_000_000
