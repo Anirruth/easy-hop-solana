@@ -1,16 +1,16 @@
 :root {
   color-scheme: dark;
   --bg: #050505;
-  --bg-soft: #0d0d0d;
+  --bg-soft: #0d0c0b;
   --card: #101010;
-  --card-strong: #171717;
+  --card-strong: #181614;
   --ink: #f1f3f5;
-  --muted: #a1a6ad;
-  --border: #262626;
-  --accent: #7ee0b2;
-  --accent-strong: #9af0c5;
-  --accent-soft: rgba(126, 224, 178, 0.14);
-  --shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+  --muted: #afb4bc;
+  --border: #2b2b2b;
+  --accent: #7dd3fc;
+  --accent-strong: #bae6fd;
+  --accent-soft: rgba(125, 211, 252, 0.14);
+  --shadow: 0 12px 26px rgba(0, 0, 0, 0.4);
   --radius-lg: 16px;
   --radius-md: 11px;
   --radius-sm: 8px;
@@ -25,7 +25,8 @@ body {
   min-height: 100vh;
   font-family: "IBM Plex Sans", "Space Grotesk", sans-serif;
   background:
-    radial-gradient(1000px 600px at 50% -20%, rgba(126, 224, 178, 0.12), transparent 65%),
+    radial-gradient(1000px 600px at 50% -20%, rgba(125, 211, 252, 0.13), transparent 65%),
+    radial-gradient(800px 500px at 95% 0%, rgba(56, 189, 248, 0.08), transparent 70%),
     linear-gradient(180deg, #0b0b0b 0%, var(--bg) 55%),
     var(--bg);
   color: var(--ink);
@@ -34,7 +35,7 @@ body {
 }
 
 ::selection {
-  background: rgba(126, 224, 178, 0.2);
+  background: rgba(125, 211, 252, 0.2);
 }
 
 a {
@@ -73,7 +74,7 @@ a {
 .brand h1 {
   margin: 0 0 6px;
   font-family: "Space Grotesk", sans-serif;
-  font-size: 22px;
+  font-size: 23px;
   font-weight: 650;
   letter-spacing: -0.015em;
 }
@@ -81,7 +82,7 @@ a {
 h1 {
   margin: 0 0 6px;
   font-family: "Space Grotesk", sans-serif;
-  font-size: 24px;
+  font-size: 25px;
   font-weight: 650;
   letter-spacing: -0.015em;
 }
@@ -90,7 +91,7 @@ h1 {
   text-transform: uppercase;
   letter-spacing: 0.18em;
   color: var(--accent);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
   margin: 0 0 8px;
   opacity: 0.9;
@@ -99,14 +100,14 @@ h1 {
 h2 {
   margin: 0 0 3px;
   font-family: "Space Grotesk", sans-serif;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 620;
 }
 
 .subhead {
   margin: 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .sidebar-head {
@@ -122,7 +123,7 @@ h2 {
 }
 
 .card {
-  background: linear-gradient(180deg, rgba(16, 16, 16, 0.95), rgba(13, 13, 13, 0.95));
+  background: linear-gradient(180deg, rgba(17, 17, 17, 0.95), rgba(12, 12, 12, 0.95));
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 18px;
@@ -148,12 +149,12 @@ h2 {
 }
 
 .action-card {
-  background: linear-gradient(180deg, rgba(18, 18, 18, 0.95), rgba(12, 12, 12, 0.95));
+  background: linear-gradient(180deg, rgba(22, 18, 30, 0.95), rgba(12, 12, 12, 0.95));
 }
 
 .muted {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .strong {
@@ -170,7 +171,7 @@ h2 {
   padding: 10px 12px;
   border-radius: var(--radius-sm);
   background: var(--accent-soft);
-  border: 1px solid rgba(126, 224, 178, 0.28);
+  border: 1px solid rgba(125, 211, 252, 0.28);
   font-size: 12px;
   color: var(--muted);
   line-height: 1.5;
@@ -229,13 +230,13 @@ h2 {
 }
 
 .position-item:hover {
-  border-color: rgba(126, 224, 178, 0.35);
+  border-color: rgba(125, 211, 252, 0.35);
   background: rgba(22, 22, 22, 0.9);
 }
 
 .position-item.active {
-  border-color: rgba(126, 224, 178, 0.6);
-  background: rgba(126, 224, 178, 0.1);
+  border-color: rgba(125, 211, 252, 0.6);
+  background: rgba(125, 211, 252, 0.1);
 }
 
 .position-title {
@@ -273,13 +274,13 @@ h2 {
   background: transparent;
   padding: 5px 11px;
   border-radius: 999px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--muted);
 }
 
 .segmented button.active {
-  background: rgba(126, 224, 178, 0.2);
+  background: rgba(125, 211, 252, 0.2);
   color: var(--ink);
 }
 
@@ -319,9 +320,9 @@ h2 {
 }
 
 .inline-badge {
-  background: rgba(126, 224, 178, 0.12);
+  background: rgba(125, 211, 252, 0.12);
   color: var(--accent);
-  border: 1px solid rgba(126, 224, 178, 0.3);
+  border: 1px solid rgba(125, 211, 252, 0.3);
   padding: 5px 10px;
   border-radius: 999px;
   font-size: 10px;
@@ -381,7 +382,7 @@ h2 {
 }
 
 .hop-card {
-  border: 1px dashed rgba(126, 224, 178, 0.32);
+  border: 1px dashed rgba(125, 211, 252, 0.32);
   border-radius: var(--radius-md);
   background: rgba(12, 12, 12, 0.62);
   padding: 10px 12px;
@@ -395,13 +396,13 @@ h2 {
 }
 
 .hop-card:hover {
-  border-color: rgba(126, 224, 178, 0.62);
+  border-color: rgba(125, 211, 252, 0.62);
   background: rgba(22, 22, 22, 0.9);
 }
 
 .hop-card.active {
-  border-color: rgba(126, 224, 178, 0.92);
-  background: rgba(126, 224, 178, 0.1);
+  border-color: rgba(125, 211, 252, 0.92);
+  background: rgba(125, 211, 252, 0.1);
 }
 
 .hop-arrow {
@@ -441,8 +442,8 @@ select {
 
 input:focus,
 select:focus {
-  border-color: rgba(126, 224, 178, 0.62);
-  box-shadow: 0 0 0 3px rgba(126, 224, 178, 0.14);
+  border-color: rgba(125, 211, 252, 0.62);
+  box-shadow: 0 0 0 3px rgba(125, 211, 252, 0.14);
 }
 
 input::placeholder {
@@ -456,19 +457,19 @@ button {
 }
 
 button.primary {
-  background: rgba(126, 224, 178, 0.2);
+  background: rgba(125, 211, 252, 0.2);
   color: var(--ink);
-  border: 1px solid rgba(126, 224, 178, 0.45);
+  border: 1px solid rgba(125, 211, 252, 0.45);
   padding: 8px 18px;
   border-radius: var(--radius-sm);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 650;
   box-shadow: none;
 }
 
 button.primary:hover:not(:disabled) {
-  background: rgba(126, 224, 178, 0.3);
-  border-color: rgba(126, 224, 178, 0.72);
+  background: rgba(125, 211, 252, 0.3);
+  border-color: rgba(125, 211, 252, 0.72);
 }
 
 button.primary:disabled {
@@ -524,8 +525,8 @@ button.ghost:hover:not(:disabled) {
 
 .quick-amount:hover:not(:disabled) {
   color: var(--ink);
-  border-color: rgba(126, 224, 178, 0.5);
-  background: rgba(126, 224, 178, 0.1);
+  border-color: rgba(125, 211, 252, 0.5);
+  background: rgba(125, 211, 252, 0.1);
 }
 
 .quick-amount:disabled {
@@ -656,8 +657,8 @@ button.ghost:hover:not(:disabled) {
 }
 
 .row:hover:not(.header-row) {
-  border-color: rgba(126, 224, 178, 0.35);
-  background: rgba(22, 22, 22, 0.92);
+  border-color: rgba(125, 211, 252, 0.35);
+  background: rgba(24, 19, 31, 0.92);
 }
 
 .header-row {
@@ -665,7 +666,7 @@ button.ghost:hover:not(:disabled) {
   border: none;
   padding: 0 12px 8px;
   color: #8f949e;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.09em;
@@ -678,8 +679,8 @@ button.ghost:hover:not(:disabled) {
 }
 
 .vault-row.selected {
-  border-color: rgba(126, 224, 178, 0.64);
-  background: rgba(126, 224, 178, 0.1);
+  border-color: rgba(125, 211, 252, 0.64);
+  background: rgba(125, 211, 252, 0.1);
 }
 
 .vault-main {
@@ -689,7 +690,7 @@ button.ghost:hover:not(:disabled) {
 }
 
 .vault-title {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 620;
 }
 
@@ -747,7 +748,7 @@ button.ghost:hover:not(:disabled) {
   color: var(--muted);
   padding: 2px 7px;
   border-radius: 999px;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
   border: 1px solid var(--border);
   white-space: nowrap;
@@ -764,13 +765,13 @@ button.ghost:hover:not(:disabled) {
   border-radius: 999px;
   font-size: 10px;
   font-weight: 600;
-  border: 1px solid rgba(126, 224, 178, 0.36);
+  border: 1px solid rgba(125, 211, 252, 0.36);
   transition: all 0.15s;
 }
 
 .vault-link-button:hover {
-  background: rgba(126, 224, 178, 0.12);
-  border-color: rgba(126, 224, 178, 0.64);
+  background: rgba(125, 211, 252, 0.12);
+  border-color: rgba(125, 211, 252, 0.64);
   color: var(--accent);
 }
 
