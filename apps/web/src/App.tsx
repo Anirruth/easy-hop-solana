@@ -45,6 +45,12 @@ const formatSol = (value: number) =>
 const toBaseUnits = (amount: number, decimals: number) =>
   Math.round(amount * 10 ** decimals);
 
+const toInputAmount = (amount: number, decimals: number) => {
+  if (!Number.isFinite(amount) || amount <= 0) return "0";
+  const precision = Math.min(12, Math.max(0, decimals));
+  return amount.toFixed(precision).replace(/\.?0+$/, "");
+};
+
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 
 const ENV_RPC = import.meta.env.VITE_SOLANA_RPC_URL?.trim() ?? "";
@@ -456,6 +462,12 @@ export default function App() {
     const parsed = Number(value);
     if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) return null;
     return parsed;
+  };
+
+  const applyWithdrawPreset = (fraction: number) => {
+    if (!withdrawVault || withdrawAvailable <= 0) return;
+    const nextAmount = withdrawAvailable * fraction;
+    setWithdrawAmount(toInputAmount(nextAmount, withdrawVault.assetDecimals));
   };
 
   const formatFeeDiagnostics = (details: FeeDiagnostics | null) => {
@@ -1655,6 +1667,40 @@ export default function App() {
                     onChange={(event) => setWithdrawAmount(event.target.value)}
                     placeholder="0.0"
                   />
+                  <div className="quick-amounts">
+                    <button
+                      type="button"
+                      className="quick-amount"
+                      onClick={() => applyWithdrawPreset(0.25)}
+                      disabled={!withdrawVault || withdrawAvailable <= 0}
+                    >
+                      25%
+                    </button>
+                    <button
+                      type="button"
+                      className="quick-amount"
+                      onClick={() => applyWithdrawPreset(0.5)}
+                      disabled={!withdrawVault || withdrawAvailable <= 0}
+                    >
+                      50%
+                    </button>
+                    <button
+                      type="button"
+                      className="quick-amount"
+                      onClick={() => applyWithdrawPreset(0.75)}
+                      disabled={!withdrawVault || withdrawAvailable <= 0}
+                    >
+                      75%
+                    </button>
+                    <button
+                      type="button"
+                      className="quick-amount"
+                      onClick={() => applyWithdrawPreset(1)}
+                      disabled={!withdrawVault || withdrawAvailable <= 0}
+                    >
+                      100%
+                    </button>
+                  </div>
                 </label>
                 <label>
                   Slippage (%)

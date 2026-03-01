@@ -971,39 +971,15 @@ const buildSolDepositPlan = async ({
     };
   };
 
-  // First pass: estimate non-swap debits from the generated transaction plan.
-  const provisional = await buildForSwapLamports(requestedLamports);
-  const provisionalSetup = await estimateEmbeddedSetupLamports(
-    connection,
-    user,
-    provisional.transactions.filter((entry) => entry.label.startsWith("deposit"))
-  );
-  const provisionalFees = estimateTransactionCostLamports(provisional.transactions);
-  const reserveLamports = provisionalSetup.totalLamports + provisionalFees.totalLamports;
-  const boundedSwapInputLamports = Math.max(0, requestedLamports - reserveLamports);
-
-  if (vault.assetMint !== SOL_MINT && boundedSwapInputLamports <= 0) {
-    throw new Error(
-      "Requested SOL is too small after setup/network fees. Increase amount or reduce setup costs first."
-    );
-  }
-
-  const needsRebuild =
-    vault.assetMint !== SOL_MINT &&
-    Math.abs(requestedLamports - boundedSwapInputLamports) >= 1;
-  const finalBuild = needsRebuild
-    ? await buildForSwapLamports(boundedSwapInputLamports)
-    : provisional;
+  // Treat requested SOL as exact swap input. Fees and setup are additional wallet debits.
+  const finalBuild = await buildForSwapLamports(requestedLamports);
   const finalSetup = await estimateEmbeddedSetupLamports(
     connection,
     user,
     finalBuild.transactions.filter((entry) => entry.label.startsWith("deposit"))
   );
   const finalFees = estimateTransactionCostLamports(finalBuild.transactions);
-  const swapInputLamports =
-    needsRebuild && vault.assetMint !== SOL_MINT
-      ? boundedSwapInputLamports
-      : requestedLamports;
+  const swapInputLamports = requestedLamports;
   const estimatedTotalDebitLamports =
     swapInputLamports + finalSetup.totalLamports + finalFees.totalLamports;
 
