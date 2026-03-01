@@ -1581,23 +1581,23 @@ export default function App() {
               <h2>Vault actions</h2>
               <p className="muted">Fund, withdraw, or hop between vaults.</p>
             </div>
-            <div className="segmented">
+            <div className="segmented" data-active={activeAction}>
               <button
-                className={activeAction === "deposit" ? "active" : ""}
+                className={`segment-btn${activeAction === "deposit" ? " active" : ""}`}
                 onClick={() => setActiveAction("deposit")}
                 type="button"
               >
                 Fund
               </button>
               <button
-                className={activeAction === "withdraw" ? "active" : ""}
+                className={`segment-btn${activeAction === "withdraw" ? " active" : ""}`}
                 onClick={() => setActiveAction("withdraw")}
                 type="button"
               >
                 Withdraw
               </button>
               <button
-                className={activeAction === "hop" ? "active" : ""}
+                className={`segment-btn${activeAction === "hop" ? " active" : ""}`}
                 onClick={() => setActiveAction("hop")}
                 type="button"
               >
@@ -1607,7 +1607,7 @@ export default function App() {
           </div>
 
           {activeAction === "deposit" && (
-            <>
+            <div className="action-panel">
               {selectedVault ? (
                 <div className="selected-vault">
                   <div>
@@ -1930,11 +1930,11 @@ export default function App() {
                   {formatFeeDiagnostics(depositFeeDetails)}
                 </p>
               )}
-            </>
+            </div>
           )}
 
           {activeAction === "withdraw" && (
-            <>
+            <div className="action-panel">
               <div className="move-grid">
                 <label>
                   Vault
@@ -2118,11 +2118,11 @@ export default function App() {
                   {formatFeeDiagnostics(withdrawFeeDetails)}
                 </p>
               )}
-            </>
+            </div>
           )}
 
           {activeAction === "hop" && (
-            <>
+            <div className="action-panel">
               <div className="hop-selector">
                 <button
                   type="button"
@@ -2288,7 +2288,7 @@ export default function App() {
                   {formatFeeDiagnostics(hopFeeDetails)}
                 </p>
               )}
-            </>
+            </div>
           )}
         </section>
 

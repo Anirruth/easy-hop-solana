@@ -65,6 +65,10 @@ a {
   gap: 12px;
 }
 
+.brand {
+  animation: fadeUp 0.4s ease both;
+}
+
 .main {
   display: flex;
   flex-direction: column;
@@ -129,7 +133,7 @@ h2 {
   padding: 18px;
   box-shadow: var(--shadow);
   backdrop-filter: blur(6px);
-  animation: fadeUp 0.35s ease both;
+  animation: fadeUp 0.42s ease both;
 }
 
 .card:nth-of-type(2) {
@@ -138,6 +142,24 @@ h2 {
 
 .card:nth-of-type(3) {
   animation-delay: 0.1s;
+}
+
+.sidebar .card:nth-of-type(1),
+.main .card:nth-of-type(1),
+.rightbar .card:nth-of-type(1) {
+  animation-delay: 0.04s;
+}
+
+.sidebar .card:nth-of-type(2),
+.main .card:nth-of-type(2),
+.rightbar .card:nth-of-type(2) {
+  animation-delay: 0.09s;
+}
+
+.sidebar .card:nth-of-type(3),
+.main .card:nth-of-type(3),
+.rightbar .card:nth-of-type(3) {
+  animation-delay: 0.14s;
 }
 
 .card h2 {
@@ -261,15 +283,40 @@ h2 {
 }
 
 .segmented {
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   background: rgba(8, 8, 8, 0.72);
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 3px;
-  gap: 4px;
+  position: relative;
+  isolation: isolate;
 }
 
-.segmented button {
+.segmented::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: calc((100% - 6px) / 3);
+  height: calc(100% - 6px);
+  border-radius: 999px;
+  border: 1px solid rgba(125, 211, 252, 0.45);
+  background: rgba(125, 211, 252, 0.2);
+  transform: translateX(0);
+  transition: transform 0.24s ease, background 0.24s ease, border-color 0.24s ease;
+  z-index: 0;
+}
+
+.segmented[data-active="withdraw"]::before {
+  transform: translateX(100%);
+}
+
+.segmented[data-active="hop"]::before {
+  transform: translateX(200%);
+}
+
+.segment-btn {
   border: none;
   background: transparent;
   padding: 5px 11px;
@@ -277,11 +324,17 @@ h2 {
   font-size: 11px;
   font-weight: 600;
   color: var(--muted);
+  position: relative;
+  z-index: 1;
+  transition: color 0.2s ease;
 }
 
-.segmented button.active {
-  background: rgba(125, 211, 252, 0.2);
+.segment-btn.active {
   color: var(--ink);
+}
+
+.action-panel {
+  animation: panelIn 0.24s ease both;
 }
 
 .filter-field {
@@ -453,7 +506,11 @@ input::placeholder {
 button {
   font-family: inherit;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all 0.16s ease;
+}
+
+button:active:not(:disabled) {
+  transform: translateY(1px) scale(0.985);
 }
 
 button.primary {
@@ -606,6 +663,7 @@ button.ghost:hover:not(:disabled) {
 
 .flow-step.confirmed .flow-dot {
   background: var(--accent);
+  animation: dotPop 0.28s ease-out both;
 }
 
 .flow-step.failed .flow-dot {
@@ -654,11 +712,14 @@ button.ghost:hover:not(:disabled) {
   border-radius: var(--radius-md);
   font-size: 12px;
   border: 1px solid var(--border);
+  transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
 }
 
 .row:hover:not(.header-row) {
   border-color: rgba(125, 211, 252, 0.35);
   background: rgba(24, 19, 31, 0.92);
+  transform: translateY(-1px);
+  box-shadow: 0 10px 18px rgba(0, 0, 0, 0.24);
 }
 
 .header-row {
@@ -681,6 +742,7 @@ button.ghost:hover:not(:disabled) {
 .vault-row.selected {
   border-color: rgba(125, 211, 252, 0.64);
   background: rgba(125, 211, 252, 0.1);
+  animation: selectedPulse 0.32s ease-out;
 }
 
 .vault-main {
@@ -808,6 +870,41 @@ button.ghost:hover:not(:disabled) {
   }
 }
 
+@keyframes selectedPulse {
+  0% {
+    box-shadow: 0 0 0 rgba(125, 211, 252, 0);
+  }
+  45% {
+    box-shadow: 0 0 0 4px rgba(125, 211, 252, 0.2);
+  }
+  100% {
+    box-shadow: 0 0 0 rgba(125, 211, 252, 0);
+  }
+}
+
+@keyframes dotPop {
+  0% {
+    transform: scale(0.85);
+  }
+  60% {
+    transform: scale(1.12);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes panelIn {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
 @media (max-width: 1200px) {
   .page {
     width: min(98vw, 1280px);
@@ -851,5 +948,11 @@ button.ghost:hover:not(:disabled) {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+
+  .row:hover:not(.header-row),
+  button:active:not(:disabled) {
+    transform: none !important;
+    box-shadow: none !important;
   }
 }
